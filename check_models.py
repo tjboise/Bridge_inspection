@@ -1,7 +1,7 @@
 import google.generativeai as genai
 
 # 填入您的 Google Key
-GOOGLE_API_KEY = "AIzaSyCbT-SgZiczAmzSIT3abCETfKjDYWpCYGs"
+GOOGLE_API_KEY = "AIzaSyDBt4A8UHgyk_QhSTX70GUTDVXRLX1bm6M"
 genai.configure(api_key=GOOGLE_API_KEY)
 
 print("正在查询可用模型列表...\n")
