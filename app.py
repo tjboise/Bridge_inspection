@@ -39,9 +39,9 @@ st.set_page_config(
 # 🎨 Sidebar
 with st.sidebar:
     st.header("⚙️ System Status")
-    st.info("🧠 Vision: Gemini 2.5 / 1.5")
-    st.info("⚡ Planning: Llama 3 (Groq)")
-    st.info("👁️ Segmentation: AECIF-Net (CPU)")
+    st.info("🧠 Vision: Gemini 2.5")
+    st.info("⚡ Planning: Llama 3")
+    st.info("👁️ Segmentation: AECIF-Net")
 
 # ==========================================
 # 2. Backend Logic
