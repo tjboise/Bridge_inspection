@@ -3,5 +3,5 @@ opencv-python-headless
 numpy
 Pillow
 torch
-torchvision
+google-generativeai
 openai
