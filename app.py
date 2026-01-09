@@ -32,12 +32,12 @@ genai.configure(api_key=GOOGLE_API_KEY)
 with st.sidebar:
     st.header("⚙️ Architecture")
     st.success("🧠 Planner: Gemini Auto-Switch")
-    st.success("🛠️ Refiner: Self-Correction")
+    st.success("👮 Refiner: Strict Keyword Enforcer")
     st.info("👁️ Vision: AECIF-Net")
 
     st.divider()
     debug_mode = st.checkbox("🔬 Diagnostic Mode", value=True)
-    st.caption("v9.2 - Constraint Nuke Fix")
+    st.caption("v9.3 - Entity ID Hard-Lock")
 
 # ==========================================
 # 2. Backend Logic
@@ -76,39 +76,63 @@ def clean_json_string(text):
 
 
 def business_logic_refine(plan, query):
+    """
+    👮 独裁者逻辑：关键词强制修正
+    """
     q = query.lower()
 
-    # 规则 1：Overview 必须查 Rust
+    # --- 1. 意图修正 ---
+    # Overview 必须查 Rust
     if any(k in q for k in ["overview", "defect", "summary", "check", "condition"]):
         if plan['intent'] != 'detect_defects':
             plan['intent'] = 'detect_defects'
-
         targets = plan.get('target_layers', [])
         if not targets: targets = []
         if not any(t.get('name') == 'Rust' for t in targets):
             targets.append({"type": "defects", "id": 1, "name": "Rust"})
         plan['target_layers'] = targets
 
-    # 规则 2：All elements / Show me -> Visualize
+    # Show/Segment -> Visualize
     if any(k in q for k in ["show", "see", "visual", "segment", "highlight", "draw"]):
         plan['intent'] = 'visualize'
 
-    # 规则 3：全量显示
+    # --- 2. 实体 ID 强行锁定 (Hard-Lock) ---
+    # 这是 V9.3 的核心：如果用户说了某个部件的名字，直接覆盖 LLM 的 targets
+
+    detected_elements = []
+    # 扫描所有部件关键词
+    for eid, name in ELEMENT_MAP.items():
+        # 处理复数情况 (girder/girders)
+        if name.lower() in q or name.lower() + "s" in q:
+            detected_elements.append({"type": "elements", "id": eid, "name": name})
+
+    # 扫描 Rust
+    if "rust" in q or "corrosion" in q:
+        detected_elements.append({"type": "defects", "id": 1, "name": "Rust"})
+
+    # 如果在句子里找到了明确的实体，就以找到的为准，扔掉 LLM 的幻觉
+    if detected_elements:
+        # 特殊情况：如果是 "All elements"，我们在下面处理，不要在这里覆盖
+        if not ("all" in q and ("element" in q or "part" in q)):
+            plan['target_layers'] = detected_elements
+            # 只要找到了明确实体，顺便把 intent 改成 visualize (除非是 overview)
+            if plan['intent'] != 'detect_defects':
+                plan['intent'] = 'visualize'
+
+    # --- 3. 全量显示 ---
     has_all = "all" in q or "every" in q or "whole" in q
     has_part = "element" in q or "part" in q or "component" in q
+
     if has_all and has_part:
         plan['intent'] = 'visualize'
         plan['target_layers'] = [{"type": "elements", "id": i, "name": name} for i, name in ELEMENT_MAP.items()]
         plan['constraint_layers'] = []
 
-        # 🔥 规则 4 (新)：核弹级约束清洗
-    # 如果用户没说 "on", "in", "within" 这种介词，严禁使用 Constraint！
-    # 这能防止 "Segment Girder" 被 AI 脑补成 "Girder on Bearing" 导致交集为 0
+        # --- 4. 约束清洗 ---
     spatial_prepositions = [" on ", " in ", " within ", " inside ", " atop "]
     has_spatial = any(prep in f" {q} " for prep in spatial_prepositions)
-
     if not has_spatial:
-        plan['constraint_layers'] = []  # 强制清空，避免 AI 瞎加戏
+        plan['constraint_layers'] = []
 
     return plan
 
@@ -119,17 +143,13 @@ def ask_gemini_plan_with_retry(query):
     base_prompt = """
     Role: Bridge Inspection Orchestrator.
     Task: Convert user query to JSON.
-
-    Logic:
-    1. "visualize": User wants to SEE/LOCATE. (Keywords: Show, Segment, Where is)
-    2. "detect_defects": User wants REPORT/TEXT ONLY. (Keywords: Overview, Summary, Report)
-
+    Entities: Elements(1-6), Defects(1:Rust).
     Output JSON Schema:
     {
       "intent": "visualize" | "detect_defects" | "chat",
       "reply": "str",
       "target_layers": [{"type": "elements"|"defects", "id": int, "name": "str"}],
-      "constraint_layers": [{"type": "elements"|"defects", "id": int}]
+      "constraint_layers": []
     }
     """
     log_buffer = ""
@@ -141,6 +161,7 @@ def ask_gemini_plan_with_retry(query):
             try:
                 plan = json.loads(draft_text)
                 if "intent" not in plan: raise ValueError("Missing 'intent'")
+                # 🔥 关键：调用独裁逻辑
                 final_plan = business_logic_refine(plan, query)
                 log_buffer += f"✅ Model {model_name} succeeded.\n"
                 return final_plan, log_buffer
@@ -150,6 +171,7 @@ def ask_gemini_plan_with_retry(query):
         except Exception as e:
             continue
 
+            # 最后的兜底
     return keyword_rescue(query, log_buffer)
 
 
@@ -157,20 +179,17 @@ def keyword_rescue(query, previous_logs):
     q = query.lower()
     log = previous_logs + "\n💀 AI failed. Using Keyword Rescue."
 
-    # 1. Visualize Keywords
-    if any(k in q for k in ["show", "see", "segment", "highlight", "draw"]):
-        # Check for specific elements
-        for eid, name in ELEMENT_MAP.items():
-            if name.lower() in q:
-                return {"intent": "visualize", "target_layers": [{"type": "elements", "id": eid, "name": name}],
-                        "constraint_layers": []}, log
-        # Default visualize all if "all" is present
-        if "all" in q:
-            return {"intent": "visualize",
-                    "target_layers": [{"type": "elements", "id": i, "name": n} for i, n in ELEMENT_MAP.items()],
-                    "constraint_layers": []}, log
+    # 既然有了 business_logic_refine，这里的逻辑其实大部分重复了
+    # 但为了防止 ask_gemini_plan_with_retry 全部 crash，保留这个兜底
 
-    # 2. Defects/Overview
+    # 1. 尝试直接复用独裁逻辑
+    dummy_plan = {"intent": "chat", "target_layers": [], "constraint_layers": []}
+    rescued_plan = business_logic_refine(dummy_plan, query)
+
+    if rescued_plan['target_layers']:
+        return rescued_plan, log
+
+    # 2. 实在不行默认查锈
     return {
         "intent": "detect_defects",
         "target_layers": [{"type": "defects", "id": 1, "name": "Rust"}],
@@ -179,33 +198,28 @@ def keyword_rescue(query, previous_logs):
 
 
 def generate_expert_response(query, stats, image, intent):
-    """Step 3: Expert (根据意图区分 Prompt)"""
+    """Step 3: Expert"""
     models = get_best_model()
 
     if intent == 'visualize':
-        # 🌟 模式 A：看图模式 (极简)
         prompt = f"""
         User Query: "{query}"
         CNN Findings: {stats}
-
         [TASK]
-        The user wants to see the visualization. 
-        1. Confirm what is highlighted in the image.
-        2. Be extremely BRIEF (Max 2 sentences). 
-        3. DO NOT describe the bridge structure or history. 
-        4. DO NOT reference "crops" or "patches".
+        User wants to SEE visualization. 
+        1. Confirm what is highlighted.
+        2. Brief (Max 2 sentences).
+        3. NO mention of "crops", "patches".
         """
     else:
-        # 🌟 模式 B：报告模式 (详细)
         prompt = f"""
         User Query: "{query}"
         [Sensor Data]: {stats}
-
         [TASK]
-        Act as a Senior Bridge Inspector. Provide a comprehensive overview.
-        1. Direct Answer to the user.
-        2. Integrate visual observations with sensor data naturally.
-        3. ⛔️ CRITICAL: Do NOT mention "crops", "patches", or specific image file names. Treat the image as one whole scene.
+        Senior Bridge Inspector Report.
+        1. Direct Answer.
+        2. Integrate visual & sensor data.
+        3. NO mention of "crops".
         """
 
     for model_name in models:
@@ -267,7 +281,6 @@ def process_vision_smart(hrnet, image_pil, plan, debug=False):
         curr = mask_d if ttype == 'defects' else mask_e
         curr_mask = (curr == tid).astype(np.uint8)
 
-        # ⚠️ 调试关键：看看是不是约束层把像素杀光了
         raw_pixels = np.sum(curr_mask)
 
         if roi_mask is not None:
@@ -276,7 +289,6 @@ def process_vision_smart(hrnet, image_pil, plan, debug=False):
         pixel_count = np.sum(curr_mask)
         rgb = hrnet.colors_1[tid] if ttype == 'defects' else hrnet.colors[tid]
 
-        # ⚠️ 诊断日志输出
         if debug and raw_pixels > 0:
             status = "✅ Kept" if pixel_count > 0 else "❌ BLOCKED by Constraint"
             st.sidebar.text(f"{correct_name}: {raw_pixels}px -> {status}")
@@ -334,7 +346,7 @@ with col2:
             if msg.get("log"):
                 with st.expander("🛠️ Correction Log"): st.text(msg["log"])
 
-    if up_file and (query := st.chat_input("Ex: Give me an overview")):
+    if up_file and (query := st.chat_input("Ex: Segment the girder")):
         st.session_state['history'].append({"role": "user", "content": query})
         with chat_box.chat_message("user"):
             st.markdown(query)
@@ -366,7 +378,6 @@ with col2:
 
                 # 🌟 显示控制
                 show_img = (plan['intent'] == 'visualize')
-
                 if show_img:
                     st.image(res_img)
                     if legend: st.markdown(render_legend(legend), unsafe_allow_html=True)
