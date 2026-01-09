@@ -38,9 +38,9 @@ with st.sidebar:
     st.header("⚙️ System Status")
     st.info("🧠 Brain 1: Llama 3 (Planning)")
     st.info("🧠 Brain 2: Gemini 2.5 (Analysis)")
-    st.info("👁️ Vision: AECIF-Net (CPU)")
+    st.info("👁️ Vision: AECIF-Net")
     st.divider()
-    st.caption("v4.0 - With Thought Process Log")
+    st.caption("v5.0 - Spatial Logic & Thought Logs")
 
 
 # ==========================================
@@ -62,7 +62,7 @@ def fallback_keyword_plan(query):
     🚑 紧急备用计划：当 Llama 脑子短路时，用关键词硬匹配
     """
     q = query.lower()
-    debug_log = "⚠️ Llama failed or hallucinated. Triggered Rule-Based Fallback.\n"
+    debug_log = "⚠️ Llama failed/hallucinated. Triggered Rule-Based Fallback.\n"
 
     # 1. 尝试匹配部件
     elements_map = {
@@ -77,6 +77,7 @@ def fallback_keyword_plan(query):
             return {
                 "intent": "visualize",
                 "target_layers": [{"type": "elements", "id": eid, "name": name.capitalize()}],
+                "constraint_layer": None,
                 "reply": f"Found '{name}' in your query."
             }, debug_log
 
@@ -86,6 +87,7 @@ def fallback_keyword_plan(query):
         return {
             "intent": "visualize",
             "target_layers": [{"type": "defects", "id": 1, "name": "Rust"}],
+            "constraint_layer": None,
             "reply": "Switching to Rust detection."
         }, debug_log
 
@@ -99,32 +101,35 @@ def fallback_keyword_plan(query):
 
 
 def ask_llm_plan(query):
-    """Step 1: 使用 Groq (Llama3) 规划 + 关键词双保险 + 返回思考日志"""
+    """Step 1: 使用 Groq (Llama3) 规划 (含空间逻辑)"""
     if not GROQ_API_KEY: return fallback_keyword_plan(query)[0], "Groq Key Missing"
 
     client = OpenAI(api_key=GROQ_API_KEY, base_url="https://api.groq.com/openai/v1")
 
     system_prompt = """
     You are the intelligent brain of a Bridge Inspection System. 
-    Your job is to understand the user's *underlying intent* and map it to system modules.
+    Map user query to JSON.
 
     **Core Intents Logic:**
 
     1. **"visualize"** (The "Eye" Module): 
-       - USE WHEN: User wants to know the **location, shape, or existence** of specific parts.
-       - KEYWORDS (Flexible): "Show", "Segment", "Highlight", "Where is...", "Draw", "Mark", "Identify visual", "Find".
-       - EXAMPLES:
-         - "Segment the girder" -> {"intent": "visualize", "target_layers": [{"id": 5, "name": "Girder"}]}
-         - "Show me the deck" -> {"intent": "visualize", "target_layers": [{"id": 3, "name": "Deck"}]}
+       - USE WHEN: User wants to SEE/LOCATE specific parts.
+       - KEYWORDS: Show, Segment, Highlight, Where is, Find, Mark.
+
+       **SPATIAL LOGIC (Crucial for "A on B"):**
+       - If user says "Show [Target] ON/IN [Constraint]":
+         - `target_layers`: The item user wants to see (e.g., Rust).
+         - `constraint_layer`: The background item (e.g., Bearing).
+       - EXAMPLE 1: "Show rust on the bearing" 
+         -> {"intent": "visualize", "target_layers": [{"type": "defects", "id": 1, "name": "Rust"}], "constraint_layer": {"type": "elements", "id": 1, "name": "Bearing"}}
+       - EXAMPLE 2: "Show the bearing" (No constraint)
+         -> {"intent": "visualize", "target_layers": [{"id": 1, "name": "Bearing"}], "constraint_layer": null}
 
     2. **"detect_defects"** (The "Analyst" Module):
-       - USE WHEN: User wants an **assessment, judgment, report, or diagnosis**.
-       - KEYWORDS (Flexible): "Analyze", "Assess condition", "Check for damage", "Is it safe?", "Report".
+       - USE WHEN: User wants ASSESSMENT (Analyze, Report, Check condition).
 
-    3. **"scan"** (The "Inventory" Module):
-       - USE WHEN: User asks what elements are present in the image.
-
-    4. **"chat"**: Casual conversation.
+    3. **"scan"**: List all parts.
+    4. **"chat"**: Casual.
 
     **Output JSON ONLY.**
     ID Mapping: Elements: 1:Bearing, 2:Bracing, 3:Deck, 4:Floor Beam, 5:Girder, 6:Pier. Defects: 1:Rust.
@@ -137,11 +142,8 @@ def ask_llm_plan(query):
             temperature=0.1
         )
         raw_content = response.choices[0].message.content
-
-        # 📝 记录原始思考过程
         thought_log = f"**Llama 3 Raw Output:**\n{raw_content}\n\n"
 
-        # 清洗 JSON
         content = raw_content.replace("```json", "").replace("```", "").strip()
         s = content.find('{');
         e = content.rfind('}')
@@ -152,20 +154,17 @@ def ask_llm_plan(query):
             thought_log += f"**Parsed Plan:**\n{json.dumps(plan, indent=2)}"
             return plan, thought_log
         else:
-            raise ValueError("No valid JSON found in response")
+            raise ValueError("No Valid JSON")
 
     except Exception as e:
-        # 🌟 触发兜底，并记录日志
         fallback_plan, fallback_log = fallback_keyword_plan(query)
-        error_log = f"⚠️ Llama Error: {str(e)}\n\n👉 {fallback_log}"
-        return fallback_plan, error_log
+        return fallback_plan, f"⚠️ Llama Error: {str(e)}\n\n👉 {fallback_log}"
 
 
 def generate_hybrid_expert_summary(user_query, visual_stats, image_pil, plan_intent="detect_defects"):
-    """Step 3: Google Gemini 分析 + 返回思考日志"""
+    """Step 3: Google Gemini 分析"""
     if not GOOGLE_API_KEY: return "⚠️ Google API Key missing.", "No Key"
 
-    # 🌟 智能切换 Prompt
     if plan_intent == 'visualize':
         prompt_type = "Concise (Visual Check)"
         prompt = f"""
@@ -188,8 +187,8 @@ def generate_hybrid_expert_summary(user_query, visual_stats, image_pil, plan_int
         """
 
     candidate_models = [
-        'gemini-2.5-flash',  # 优先
-        'gemini-1.5-flash-002',  # 备用
+        'gemini-2.5-flash',
+        'gemini-1.5-flash-002',
         'gemini-1.5-flash'
     ]
 
@@ -199,7 +198,6 @@ def generate_hybrid_expert_summary(user_query, visual_stats, image_pil, plan_int
             model = genai.GenerativeModel(model_name)
             response = model.generate_content([prompt, image_pil])
 
-            # 📝 记录 Gemini 的思考背景
             thought_log = f"**Model Used:** {model_name}\n"
             thought_log += f"**Prompt Strategy:** {prompt_type}\n"
             thought_log += f"**Visual Inputs (CNN):** {visual_stats}\n"
@@ -226,48 +224,57 @@ def process_vision_colorful(hrnet, image_pil, plan):
     targets = plan.get('target_layers', [])
     intent = plan.get('intent')
 
-    # 🛠️ 修复 2：防止漏检 Rust
-    # 如果意图是“查病害(detect_defects)”，但列表里竟然没有 Rust，强制加进去！
+    # 1. 空间约束逻辑 (Constraint Layer)
+    roi_mask = None
+    c_layer = plan.get('constraint_layer')
+
+    if c_layer and isinstance(c_layer, dict) and 'id' in c_layer:
+        c_id = c_layer['id']
+        c_type = c_layer.get('type', 'elements')
+
+        if c_type == 'elements':
+            roi_mask = (mask_e_idx == c_id).astype(np.uint8)
+        elif c_type == 'defects':
+            roi_mask = (mask_d_idx == c_id).astype(np.uint8)
+
+        # 🌟 把约束层画成白色轮廓 (上下文)
+        if roi_mask is not None and np.sum(roi_mask) > 0:
+            contours, _ = cv2.findContours(roi_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            cv2.drawContours(res_img_rgb, contours, -1, (255, 255, 255), 1)
+
+    # 2. 鲁棒性逻辑：查病害必须带 Rust
     if intent == 'detect_defects':
         has_rust = any(t.get('name') == 'Rust' for t in targets)
-        if not has_rust:
-            print("🔧 Auto-injecting Rust detection for defect mode.")
-            targets.append({"type": "defects", "id": 1, "name": "Rust"})
+        if not has_rust: targets.append({"type": "defects", "id": 1, "name": "Rust"})
 
-    # 🛠️ 修复 3：防止 visualize 模式下空列表导致不显示
-    # 如果是 visualize 但列表为空（比如用户只说 Show me），默认显示所有部件
+    # 3. 鲁棒性逻辑：空指令兜底
     if intent == 'visualize' and not targets:
-        all_elements = [(1, "Bearing"), (2, "Bracing"), (3, "Deck"), (4, "Floor Beam"), (5, "Girder"), (6, "Pier")]
-        for eid, name in all_elements:
-            targets.append({"type": "elements", "id": eid, "name": name})
+        # 可选：如果 visualize 啥也没指定，可以展示所有部件
+        pass
 
     found_items = []
     legend_data = []
     stats_info = []
 
     for item in targets:
-        # 🛡️ 空值保护：如果 ID 没了，跳过
         if 'id' not in item or item['id'] is None: continue
 
-        # 🛠️ 修复 1：解决 KeyError 'type'
-        # 如果 Llama 忘了写 type，我们根据名字自动猜！
+        # 自动补全 type
         item_type = item.get('type')
         if not item_type:
-            # 简单的规则：如果是 Rust 就归为 defects，否则默认 elements
-            if item.get('name', '').lower() in ['rust', 'corrosion', 'defect']:
-                item_type = 'defects'
-            else:
-                item_type = 'elements'
+            item_type = 'defects' if item.get('name', '').lower() in ['rust', 'corrosion', 'defect'] else 'elements'
 
-        # 根据类型取 Mask
+        # 提取 Mask
         if item_type == 'elements':
             current_mask = (mask_e_idx == item['id']).astype(np.uint8)
             rgb = hrnet.colors[item['id']] if item['id'] < len(hrnet.colors) else (255, 0, 0)
-        elif item_type == 'defects':
+        else:
             current_mask = (mask_d_idx == item['id']).astype(np.uint8)
             rgb = hrnet.colors_1[item['id']] if item['id'] < len(hrnet.colors_1) else (0, 0, 255)
-        else:
-            continue
+
+        # 🌟 核心：交集运算 (Intersection)
+        if roi_mask is not None:
+            current_mask = cv2.bitwise_and(current_mask, roi_mask)
 
         pixel_count = np.sum(current_mask)
         if pixel_count > 0:
@@ -277,11 +284,16 @@ def process_vision_colorful(hrnet, image_pil, plan):
             if item['name'] not in [l[0] for l in legend_data]:
                 legend_data.append((item['name'], rgb))
 
-            total = h * w
-            ratio = (pixel_count / total) * 100
+            # 计算比例 (分母 = ROI 面积 or 全图)
+            total_area = np.sum(roi_mask) if roi_mask is not None else (h * w)
+            if total_area == 0: total_area = 1  # 防止除以零
+            ratio = (pixel_count / total_area) * 100
             stats_info.append(f"{item['name']} ({ratio:.1f}%)")
 
-    stats = f"CNN Found: {', '.join(stats_info)}" if found_items else "CNN: No specific target pixels found."
+    if roi_mask is not None:
+        stats = f"CNN Found (in ROI): {', '.join(stats_info)}" if found_items else "CNN: No target found in specified area."
+    else:
+        stats = f"CNN Found: {', '.join(stats_info)}" if found_items else "CNN: No target found."
 
     if found_items:
         mask_uint8 = combined_mask_bool.astype(np.uint8) * 255
@@ -331,12 +343,11 @@ with col_chat:
             st.markdown(msg["content"])
             if msg.get("image") is not None: st.image(msg["image"])
             if msg.get("legend"): st.markdown(msg["legend"], unsafe_allow_html=True)
-            # 🌟 回显历史记录里的思考过程 (如果有)
             if msg.get("thought_log"):
                 with st.expander("🧠 View AI Thought Process (Debug Log)"):
                     st.markdown(msg["thought_log"])
 
-    if uploaded_file and (query := st.chat_input("Ex: Segment the girder")):
+    if uploaded_file and (query := st.chat_input("Ex: Show rust on the bearing")):
         st.session_state['chat_history'].append({"role": "user", "content": query})
         with chat_container.chat_message("user"):
             st.markdown(query)
@@ -345,7 +356,7 @@ with col_chat:
             ph = st.empty()
             ph.markdown("🧠 *Planning...*")
 
-            # Step 1: Plan & Log
+            # Step 1: Plan
             plan, plan_log = ask_llm_plan(query)
 
             if plan['intent'] == 'chat':
@@ -355,24 +366,23 @@ with col_chat:
                 res_img = None
                 legend = None
             else:
+                # Step 2: Vision
                 ph.markdown("👁️ *Scanning...*")
                 res_img, stats, legend = process_vision_colorful(hrnet, st.session_state['curr_image'], plan)
 
+                # Step 3: Analysis
                 ph.markdown("🕵️ *Analyzing...*")
-                # Step 3: Analysis & Log
                 response, analysis_log = generate_hybrid_expert_summary(query, stats, st.session_state['curr_image'],
                                                                         plan.get('intent'))
 
                 ph.markdown(response)
 
-                # 🌟 合并思考日志
+                # 合并日志
                 full_log = f"### Step 1: Planning (Llama 3)\n{plan_log}\n\n---\n### Step 2: Vision (CNN)\n{stats}\n\n---\n### Step 3: Analysis (Gemini)\n{analysis_log}"
-
-                # 展示思考过程折叠框
                 with st.expander("🧠 View AI Thought Process (Debug Log)"):
                     st.markdown(full_log)
 
-            # 显示图片逻辑
+            # 显示逻辑
             should_show = (plan.get('intent') in ['visualize', 'detect_defects']) or (len(legend or []) > 0)
 
             if should_show and res_img is not None:
@@ -384,5 +394,5 @@ with col_chat:
                 "content": response,
                 "image": res_img if should_show else None,
                 "legend": render_legend_html(legend) if should_show and legend else None,
-                "thought_log": full_log  # 保存日志到历史
+                "thought_log": full_log
             })
