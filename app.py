@@ -9,6 +9,15 @@ import google.generativeai as genai
 from AECIF_Net import HRnet_Segmentation
 
 # ==========================================
+# 1. Page Setup (必须放在最前面！)
+# ==========================================
+st.set_page_config(
+    page_title="Bridge Inspection Dashboard",  # ✅ 这里改名字才生效
+    page_icon="🌉",
+    layout="wide"
+)
+
+# ==========================================
 # 0. SYSTEM CONFIGURATION (全 Gemini 豪华版)
 # ==========================================
 try:
@@ -19,11 +28,7 @@ except:
 
 genai.configure(api_key=GOOGLE_API_KEY)
 
-# ==========================================
-# 1. Page Setup
-# ==========================================
-st.set_page_config(page_title="Bridge Inspection Dashboard", page_icon="🌉", layout="wide")
-
+# 🎨 Sidebar
 with st.sidebar:
     st.header("⚙️ Architecture")
     st.success("🧠 Planner: Gemini 2.5 Flash")
@@ -208,7 +213,7 @@ def render_legend(legend):
 # ==========================================
 # 3. Frontend
 # ==========================================
-st.title("🌉 Bridge AI (Gemini 2.5)")
+st.title("🌉 Bridge Inspection Dashboard")
 
 with st.spinner("Loading Vision Model..."):
     hrnet, _ = load_model()
