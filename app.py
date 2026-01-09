@@ -107,8 +107,10 @@ def generate_hybrid_expert_summary(user_query, visual_stats, image_pil, plan_int
     # 🌟 使用你账号可用的模型列表 (包含 2.5)
     candidate_models = [
         'gemini-2.5-flash',      # 优先尝试 (你的特殊权限)
-        'gemini-1.5-flash',      # 备用稳定版
-        'gemini-1.5-flash-002'   # 备用
+        'gemini-2.5-flash-lite',      # 备用稳定版
+        'gemini-2.5-flash-tts',
+        'gemini-3-flash',# 备用
+        'gemini-robotics-er-1.5-preview'
     ]
 
     # 🌟 智能切换 Prompt：看图时不废话，写报告时才详细
