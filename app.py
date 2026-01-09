@@ -59,36 +59,54 @@ def load_model():
 
 
 def ask_llm_plan(query):
-    """Step 1: 使用 Groq (Llama3) 进行快速规划"""
+    """Step 1: 使用 Groq (Llama3) 进行【语义级】意图识别"""
     if not GROQ_API_KEY: return None, "Groq API Key is invalid."
 
     client = OpenAI(api_key=GROQ_API_KEY, base_url="https://api.groq.com/openai/v1")
 
+    # 🌟 升级版 Prompt：教 Llama 理解逻辑，而不是死记硬背
     system_prompt = """
-    You are a Bridge Inspection Agent. 
+    You are the intelligent brain of a Bridge Inspection System. 
+    Your job is to understand the user's *underlying intent* and map it to system modules.
 
-    Intents Definition:
-    1. "visualize": The user EXPLICITLY asks to "See", "Show", "Highlight", "Mark", "Display", or "Draw".
-    2. "detect_defects": The user asks "What", "How many", "Analyze", "Assess", "Report", "Is there any...".
-    3. "scan": User asks to list or find elements.
-    4. "chat": Greetings.
+    **Core Intents Logic:**
 
-    Output JSON ONLY. 
-    JSON Schema:
-    {"intent": "visualize"|"chat"|"detect_defects"|"scan", "reply": "...", "target_layers": [{"type": "elements"|"defects", "id": int, "name": str}], "constraint_layer": {"type": "elements", "id": int} or null}
+    1. **"visualize"** (The "Eye" Module): 
+       - USE WHEN: User wants to know the **location, shape, or existence** of specific parts.
+       - KEYWORDS (Flexible): "Show", "Segment", "Highlight", "Where is...", "Draw", "Mark", "Identify visual".
+       - EXAMPLES:
+         - "Segment the girder" -> {"intent": "visualize", "target_layers": [{"id": 5, "name": "Girder"}]}
+         - "Where are the bearings?" -> {"intent": "visualize", "target_layers": [{"id": 1, "name": "Bearing"}]}
+         - "Highlight the rust" -> {"intent": "visualize", "target_layers": [{"type": "defects", "id": 1, "name": "Rust"}]}
 
-    Element IDs: 1:Bearing, 2:Bracing, 3:Deck, 4:Floor Beam, 5:Girder, 6:Pier.
-    Defect IDs: 1:Rust.
+    2. **"detect_defects"** (The "Analyst" Module):
+       - USE WHEN: User wants an **assessment, judgment, report, or diagnosis**.
+       - KEYWORDS (Flexible): "Analyze", "Assess condition", "Check for damage", "Is it safe?", "Report".
+       - NOTE: If user asks generic questions like "What's wrong?", assume intent is to check Rust.
+       - EXAMPLES:
+         - "Analyze the girder" -> {"intent": "detect_defects", "target_layers": [{"id": 5, "name": "Girder"}]}
+         - "Any defects?" -> {"intent": "detect_defects", "target_layers": [{"type": "defects", "id": 1, "name": "Rust"}]}
+
+    3. **"scan"** (The "Inventory" Module):
+       - USE WHEN: User asks what elements are present in the image.
+       - EXAMPLE: "What parts do you see?" -> {"intent": "scan"}
+
+    4. **"chat"**: Casual conversation (Hello, who are you).
+
+    **Output JSON ONLY.**
+
+    **ID Mapping:**
+    Elements: 1:Bearing, 2:Bracing, 3:Deck, 4:Floor Beam, 5:Girder, 6:Pier.
+    Defects: 1:Rust.
     """
 
     try:
         response = client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": query}],
-            temperature=0.1
+            temperature=0.1  # 保持低温度，确保 JSON 格式稳定
         )
         content = response.choices[0].message.content
-        # 清洗 JSON
         content = content.replace("```json", "").replace("```", "").strip()
         s = content.find('{');
         e = content.rfind('}')
@@ -96,7 +114,6 @@ def ask_llm_plan(query):
 
         return json.loads(content), None
     except Exception as e:
-        # 兜底：如果 Llama 挂了，默认做全量检测，防止程序崩溃
         return {"intent": "detect_defects", "target_layers": [], "constraint_layer": None}, f"LLM Error: {str(e)}"
 
 
