@@ -9,16 +9,16 @@ import google.generativeai as genai
 from AECIF_Net import HRnet_Segmentation
 
 # ==========================================
-# 1. Page Setup (必须放在最前面！)
+# 1. Page Setup (老大，必须排第一)
 # ==========================================
 st.set_page_config(
-    page_title="Bridge Inspection Dashboard",  # ✅ 这里改名字才生效
+    page_title="Bridge Inspection Dashboard",
     page_icon="🌉",
     layout="wide"
 )
 
 # ==========================================
-# 0. SYSTEM CONFIGURATION (全 Gemini 豪华版)
+# 0. SYSTEM CONFIGURATION
 # ==========================================
 try:
     GOOGLE_API_KEY = st.secrets["GOOGLE_API_KEY"]
@@ -35,7 +35,7 @@ with st.sidebar:
     st.success("🕵️ Expert: Gemini 2.5 Flash")
     st.info("👁️ Vision: AECIF-Net")
     st.divider()
-    st.caption("Beta version")
+    st.caption("v6.5 - Natural Report Style")
 
 
 # ==========================================
@@ -52,14 +52,45 @@ def load_model():
 
 
 def get_best_model():
-    # 优先获取你列表里的最强模型
-    priority_list = [
+    return [
         'gemini-2.5-flash',
         'gemini-3-flash',
         'gemini-2.5-flash-lite',
         'gemini-1.5-flash'
     ]
-    return priority_list
+
+
+def refine_plan(query, plan):
+    """
+    🚑 规则修正器：防止 LLM 漏检关键病害
+    """
+    q = query.lower()
+
+    # 规则 1：如果问 "Overview" 或 "Defects"，必须查 Rust
+    keywords = ["overview", "defect", "summary", "problem", "condition", "check"]
+    if any(k in q for k in keywords):
+        if plan['intent'] != 'detect_defects':
+            plan['intent'] = 'detect_defects'
+
+        targets = plan.get('target_layers', [])
+        has_rust = any(t.get('name') == 'Rust' for t in targets)
+        if not has_rust:
+            targets.append({"type": "defects", "id": 1, "name": "Rust"})
+            plan['target_layers'] = targets
+
+    # 规则 2：如果问 "All elements"，必须展开列表
+    if "all element" in q or "everything" in q:
+        plan['intent'] = 'visualize'
+        plan['target_layers'] = [
+            {"type": "elements", "id": 1, "name": "Bearing"},
+            {"type": "elements", "id": 2, "name": "Bracing"},
+            {"type": "elements", "id": 3, "name": "Deck"},
+            {"type": "elements", "id": 4, "name": "Floor Beam"},
+            {"type": "elements", "id": 5, "name": "Girder"},
+            {"type": "elements", "id": 6, "name": "Pier"}
+        ]
+
+    return plan
 
 
 def ask_gemini_plan(query):
@@ -67,24 +98,16 @@ def ask_gemini_plan(query):
     model_candidates = get_best_model()
 
     system_prompt = """
-    You are the orchestration brain of a Bridge Inspection System.
-    Your goal is to translate user queries into executable JSON instructions for a CNN.
+    You are the orchestration brain. Translate user queries into JSON.
 
-    **Capabilities:**
-    - Elements: 1:Bearing, 2:Bracing, 3:Deck, 4:Floor Beam, 5:Girder, 6:Pier.
-    - Defects: 1:Rust.
-
-    **Logic Rules:**
-    1. **"visualize"**: User wants to SEE/LOCATE parts.
-       - "Show all elements" -> List ALL IDs [1,2,3,4,5,6] in target_layers.
-       - "Show rust on bearing" -> target: Rust(1), constraint: Bearing(1).
-    2. **"detect_defects"**: User wants ASSESSMENT/REPORT.
+    **Logic:**
+    1. "visualize": User wants to SEE/LOCATE.
+    2. "detect_defects": User wants REPORT/ASSESSMENT.
        - "Overview", "Summary" -> intent: detect_defects.
-       - ALWAYS include Rust(1) in targets for defect checks.
-    3. **"scan"**: Inventory check.
+       - ALWAYS include Rust (ID 1) in targets.
 
-    **Output JSON ONLY.** Schema:
-    {
+    **Output JSON ONLY.**
+    Schema: {
       "intent": "visualize" | "detect_defects" | "chat",
       "reply": "Only for chat",
       "target_layers": [{"type": "elements"|"defects", "id": int, "name": str}],
@@ -92,7 +115,6 @@ def ask_gemini_plan(query):
     }
     """
 
-    last_err = ""
     for model_name in model_candidates:
         try:
             model = genai.GenerativeModel(model_name)
@@ -101,18 +123,15 @@ def ask_gemini_plan(query):
             s = content.find('{');
             e = content.rfind('}')
             if s != -1 and e != -1:
-                return json.loads(content[s:e + 1]), f"**Gemini Plan ({model_name}):**\n{content}"
-            else:
-                raise ValueError("No JSON")
-        except Exception as e:
-            last_err = str(e)
+                raw_plan = json.loads(content[s:e + 1])
+                # 🌟 调用修正器
+                final_plan = refine_plan(query, raw_plan)
+                return final_plan, f"**Gemini Plan:**\n{json.dumps(final_plan, indent=2)}"
+        except:
             continue
 
-    return {
-        "intent": "detect_defects",
-        "target_layers": [{"type": "defects", "id": 1, "name": "Rust"}],
-        "constraint_layers": []
-    }, f"⚠️ Plan Error: {last_err}"
+    fallback = {"intent": "detect_defects", "target_layers": [{"type": "defects", "id": 1, "name": "Rust"}]}
+    return fallback, "⚠️ Plan Error, defaulting to Rust check."
 
 
 def generate_expert_response(query, stats, image, intent):
@@ -122,7 +141,20 @@ def generate_expert_response(query, stats, image, intent):
     if intent == 'visualize':
         prompt = f"User asked: '{query}'. CNN found: {stats}. Briefly confirm location (1 sentence). No full report."
     else:
-        prompt = f"User asked: '{query}'. CNN found: {stats}. Act as a Bridge Inspector. 1. Sensor Data, 2. Visual Analysis (look for cracks/spalling), 3. Conclusion."
+        # 🌟 核心修改：让回答更自然，不要强制分段
+        prompt = f"""
+        User Query: "{query}"
+
+        [Sensor Data Reference]: {stats}
+        (Note: If CNN found nothing, it might be a false negative. Use your vision.)
+
+        [Task]: Act as a Senior Bridge Inspector.
+        - **Direct Answer**: Address the user's specific question directly.
+        - **Holistic View**: Provide a comprehensive visual assessment of the bridge condition (check for rust, cracks, spalling, etc.).
+        - **Data Integration**: Incorporate the "Sensor Data" NATURALLY into your narrative to support your observations. 
+          - ❌ DO NOT create a separate "Sensor Data" section unless specifically asked for measurements.
+          - ✅ Example: "Visual inspection reveals significant corrosion on the girder, which is confirmed by sensors detecting 5% rust coverage."
+        """
 
     for model_name in model_candidates:
         try:
@@ -148,7 +180,7 @@ def process_vision_smart(hrnet, image_pil, plan):
     targets = plan.get('target_layers', [])
     constraints = plan.get('constraint_layers', [])
 
-    # 1. 计算约束层
+    # 1. 约束层处理
     roi_mask = None
     if constraints:
         roi_mask = np.zeros((h, w), dtype=np.uint8)
@@ -164,17 +196,21 @@ def process_vision_smart(hrnet, image_pil, plan):
             contours, _ = cv2.findContours(roi_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             cv2.drawContours(res_img, contours, -1, (255, 255, 255), 1)
 
-    # 2. 计算目标层
+    # 2. 目标层处理
     found = []
     legend = []
+    target_names_checked = []
 
     for item in targets:
         tid = item.get('id')
+        name = item.get('name', 'Unknown')
         if tid is None: continue
+
+        target_names_checked.append(name)
 
         ttype = item.get('type')
         if not ttype:
-            ttype = 'defects' if item.get('name', '').lower() in ['rust', 'corrosion'] else 'elements'
+            ttype = 'defects' if name.lower() in ['rust', 'corrosion'] else 'elements'
 
         if ttype == 'elements':
             curr_mask = (mask_e == tid).astype(np.uint8)
@@ -186,11 +222,12 @@ def process_vision_smart(hrnet, image_pil, plan):
         if roi_mask is not None:
             curr_mask = cv2.bitwise_and(curr_mask, roi_mask)
 
-        if np.sum(curr_mask) > 0:
-            found.append(item['name'])
+        pixel_count = np.sum(curr_mask)
+        if pixel_count > 0:
+            found.append(f"{name}")
             canvas[curr_mask > 0] = rgb
             mask_bool = np.logical_or(mask_bool, curr_mask > 0)
-            if item['name'] not in [l[0] for l in legend]: legend.append((item['name'], rgb))
+            if name not in [l[0] for l in legend]: legend.append((name, rgb))
 
     if found:
         mask_u8 = mask_bool.astype(np.uint8) * 255
@@ -199,7 +236,14 @@ def process_vision_smart(hrnet, image_pil, plan):
         contours, _ = cv2.findContours(mask_u8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         cv2.drawContours(res_img, contours, -1, (255, 255, 255), 2)
 
-    stats = f"Found: {', '.join(found)}" if found else "No targets found."
+    if found:
+        stats = f"CNN Detected: {', '.join(found)}"
+    else:
+        if target_names_checked:
+            stats = f"CNN scanned for [{', '.join(target_names_checked)}] but found 0 pixels."
+        else:
+            stats = "CNN: No specific targets were requested."
+
     return res_img, stats, legend
 
 
@@ -235,13 +279,12 @@ with col2:
     for msg in st.session_state['history']:
         with chat_box.chat_message(msg["role"]):
             st.markdown(msg["content"])
-            # 🌟 核心修复在这里：判断 img 是否为 None
             if msg.get("img") is not None:
                 st.image(msg["img"])
             if msg.get("log"):
                 with st.expander("🧠 Thought Process"): st.code(msg["log"], language="json")
 
-    if up_file and (query := st.chat_input("Ex: Segment all elements")):
+    if up_file and (query := st.chat_input("Ex: Give me an overview")):
         st.session_state['history'].append({"role": "user", "content": query})
         with chat_box.chat_message("user"):
             st.markdown(query)
@@ -250,7 +293,7 @@ with col2:
             status = st.empty()
 
             # Step 1: Gemini Plan
-            status.markdown("🧠 *Gemini 2.5 is planning...*")
+            status.markdown("🧠 *Planning...*")
             plan, log = ask_gemini_plan(query)
 
             if plan['intent'] == 'chat':
