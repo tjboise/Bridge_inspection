@@ -22,15 +22,15 @@ genai.configure(api_key=GOOGLE_API_KEY)
 # ==========================================
 # 1. Page Setup
 # ==========================================
-st.set_page_config(page_title="Bridge AI (Gemini 2.5)", page_icon="🌉", layout="wide")
+st.set_page_config(page_title="Bridge Inspection Dashboard", page_icon="🌉", layout="wide")
 
 with st.sidebar:
     st.header("⚙️ Architecture")
     st.success("🧠 Planner: Gemini 2.5 Flash")
     st.success("🕵️ Expert: Gemini 2.5 Flash")
-    st.info("👁️ Vision: AECIF-Net (CPU)")
+    st.info("👁️ Vision: AECIF-Net")
     st.divider()
-    st.caption("v6.1 - Using High-Tier Models")
+    st.caption("Beta versionn")
 
 
 # ==========================================
@@ -47,25 +47,18 @@ def load_model():
 
 
 def get_best_model():
-    """
-    优先获取你列表里的最强模型
-    """
-    # 🌟 针对你的截图定制的优先级列表
+    # 优先获取你列表里的最强模型
     priority_list = [
-        'gemini-2.5-flash',  # 首选：稳定且快
-        'gemini-3-flash',  # 备选：超强尝鲜
-        'gemini-2.5-flash-lite',  # 备选：轻量级
-        'gemini-1.5-flash'  # 保底
+        'gemini-2.5-flash',
+        'gemini-3-flash',
+        'gemini-2.5-flash-lite',
+        'gemini-1.5-flash'
     ]
-
-    # 简单的 fallback 逻辑，直接返回名字，让 generate_content 去试错
     return priority_list
 
 
 def ask_gemini_plan(query):
-    """
-    Step 1: 使用 Gemini 2.5 进行规划
-    """
+    """Step 1: 使用 Gemini 2.5 进行规划"""
     model_candidates = get_best_model()
 
     system_prompt = """
@@ -80,10 +73,9 @@ def ask_gemini_plan(query):
     1. **"visualize"**: User wants to SEE/LOCATE parts.
        - "Show all elements" -> List ALL IDs [1,2,3,4,5,6] in target_layers.
        - "Show rust on bearing" -> target: Rust(1), constraint: Bearing(1).
-       - "Show rust on bearing AND deck" -> target: Rust(1), constraint: [Bearing(1), Deck(3)].
     2. **"detect_defects"**: User wants ASSESSMENT/REPORT.
-       - "Overview", "Summary", "Check defects" -> intent: detect_defects.
-       - ALWAYS include Rust(1) in targets for defect checks unless specified otherwise.
+       - "Overview", "Summary" -> intent: detect_defects.
+       - ALWAYS include Rust(1) in targets for defect checks.
     3. **"scan"**: Inventory check.
 
     **Output JSON ONLY.** Schema:
@@ -96,7 +88,6 @@ def ask_gemini_plan(query):
     """
 
     last_err = ""
-    # 循环尝试你的模型列表
     for model_name in model_candidates:
         try:
             model = genai.GenerativeModel(model_name)
@@ -110,9 +101,8 @@ def ask_gemini_plan(query):
                 raise ValueError("No JSON")
         except Exception as e:
             last_err = str(e)
-            continue  # 试下一个模型
+            continue
 
-    # 如果全挂了
     return {
         "intent": "detect_defects",
         "target_layers": [{"type": "defects", "id": 1, "name": "Rust"}],
@@ -136,7 +126,6 @@ def generate_expert_response(query, stats, image, intent):
             return res.text
         except:
             continue
-
     return "Expert Error: All models failed."
 
 
@@ -154,7 +143,7 @@ def process_vision_smart(hrnet, image_pil, plan):
     targets = plan.get('target_layers', [])
     constraints = plan.get('constraint_layers', [])
 
-    # 1. 计算约束层 (Constraint Mask)
+    # 1. 计算约束层
     roi_mask = None
     if constraints:
         roi_mask = np.zeros((h, w), dtype=np.uint8)
@@ -163,14 +152,14 @@ def process_vision_smart(hrnet, image_pil, plan):
             if cid is None: continue
             if c.get('type') == 'defects':
                 roi_mask = cv2.bitwise_or(roi_mask, (mask_d == cid).astype(np.uint8))
-            else:  # elements
+            else:
                 roi_mask = cv2.bitwise_or(roi_mask, (mask_e == cid).astype(np.uint8))
 
         if np.sum(roi_mask) > 0:
             contours, _ = cv2.findContours(roi_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             cv2.drawContours(res_img, contours, -1, (255, 255, 255), 1)
 
-    # 2. 计算目标层 (Target Mask)
+    # 2. 计算目标层
     found = []
     legend = []
 
@@ -241,7 +230,9 @@ with col2:
     for msg in st.session_state['history']:
         with chat_box.chat_message(msg["role"]):
             st.markdown(msg["content"])
-            if msg.get("img"): st.image(msg["img"])
+            # 🌟 核心修复在这里：判断 img 是否为 None
+            if msg.get("img") is not None:
+                st.image(msg["img"])
             if msg.get("log"):
                 with st.expander("🧠 Thought Process"): st.code(msg["log"], language="json")
 
