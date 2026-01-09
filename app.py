@@ -37,7 +37,7 @@ with st.sidebar:
 
     st.divider()
     debug_mode = st.checkbox("🔬 Diagnostic Mode", value=True, help="See internal logs")
-    st.caption("v7.1 - Fix Constraint Conflict")
+    st.caption("v7.2 - Flexible Keywords Fix")
 
 # ==========================================
 # 2. Backend Logic
@@ -77,7 +77,7 @@ def get_best_model():
 
 def refine_plan(query, plan):
     """
-    🚑 规则修正器 v2
+    🚑 规则修正器 v3 (更灵活的关键词)
     """
     q = query.lower()
 
@@ -93,12 +93,17 @@ def refine_plan(query, plan):
             targets.append({"type": "defects", "id": 1, "name": "Rust"})
             plan['target_layers'] = targets
 
-    # 规则 2：All elements 展开 + 🔥 强制清空约束
-    # 既然用户想看“全部”，就绝对不能有 Constraint 限制！
-    if "all element" in q or "everything" in q:
+    # 规则 2：All elements 展开 (逻辑优化)
+    # 只要包含 "all" 或 "every"，并且包含 "element", "part", "component" 其中之一
+    has_all = "all" in q or "every" in q or "whole" in q
+    has_part = "element" in q or "part" in q or "component" in q or "everything" in q
+
+    if has_all and has_part:
         plan['intent'] = 'visualize'
+        # 强制覆盖 targets 为所有部件
         plan['target_layers'] = [{"type": "elements", "id": i, "name": name} for i, name in ELEMENT_MAP.items()]
-        plan['constraint_layers'] = []  # 👈 关键修复：把“紧箍咒”摘掉！
+        # 强制清空约束
+        plan['constraint_layers'] = []
 
     return plan
 
@@ -172,11 +177,9 @@ def process_vision_smart(hrnet, image_pil, plan, debug=False):
     mask_e, mask_d = hrnet.get_raw_masks(image_pil)
 
     # 🔬 详细诊断日志
-    debug_info = []
     if debug:
         unique_e = np.unique(mask_e)
         st.sidebar.warning(f"🔎 Raw IDs in Elements Mask: {unique_e}")
-        debug_info.append(f"Map raw: {unique_e}")
 
     res_img = cv2.cvtColor(img_cv, cv2.COLOR_BGR2RGB)
     canvas = np.zeros_like(res_img)
@@ -196,10 +199,6 @@ def process_vision_smart(hrnet, image_pil, plan, debug=False):
                 roi_mask = cv2.bitwise_or(roi_mask, (mask_d == cid).astype(np.uint8))
             else:
                 roi_mask = cv2.bitwise_or(roi_mask, (mask_e == cid).astype(np.uint8))
-
-        # 调试：如果有约束，显示出来
-        if debug and np.sum(roi_mask) > 0:
-            st.sidebar.info(f"🔒 Constraint Mask Active! Area: {np.sum(roi_mask)} px")
 
         if np.sum(roi_mask) > 0:
             contours, _ = cv2.findContours(roi_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -234,7 +233,7 @@ def process_vision_smart(hrnet, image_pil, plan, debug=False):
             curr_mask = (mask_d == tid).astype(np.uint8)
             rgb = hrnet.colors_1[tid] if tid < len(hrnet.colors_1) else (0, 0, 255)
 
-        # 🌟 核心调试：记录遮罩前的像素数
+        # 记录原始像素，用于Debug
         raw_pixels = np.sum(curr_mask)
 
         if roi_mask is not None:
@@ -242,6 +241,7 @@ def process_vision_smart(hrnet, image_pil, plan, debug=False):
 
         final_pixels = np.sum(curr_mask)
 
+        # 侧边栏实时显示处理进度
         if debug and raw_pixels > 0:
             status = "✅ Kept" if final_pixels > 0 else "❌ Filtered by Constraint"
             st.sidebar.text(f"Checking {correct_name} (ID {tid}): {raw_pixels}px -> {status}")
@@ -318,6 +318,10 @@ with col2:
             # Step 1: Gemini Plan
             status.markdown("🧠 *Planning...*")
             plan, log = ask_gemini_plan(query)
+
+            # 🌟 修复：立即显示当前的日志，不要等下一轮
+            with st.expander("🧠 Current Thought Process"):
+                st.code(log, language="json")
 
             if plan['intent'] == 'chat':
                 reply = plan.get('reply', 'Hello!')
