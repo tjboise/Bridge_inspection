@@ -30,7 +30,7 @@ with st.sidebar:
     st.success("🕵️ Expert: Gemini 2.5 Flash")
     st.info("👁️ Vision: AECIF-Net")
     st.divider()
-    st.caption("Beta versionn")
+    st.caption("Beta version")
 
 
 # ==========================================
