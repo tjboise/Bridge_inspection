@@ -28,16 +28,18 @@ except:
 
 genai.configure(api_key=GOOGLE_API_KEY)
 
-# 🎨 Sidebar
+# 🎨 Sidebar (UI 命名优化版)
 with st.sidebar:
     st.header("⚙️ Architecture")
-    st.success("🧠 Planner: Gemini Auto-Switch")
-    st.success("📐 Refiner: Spatial Logic Aware")
-    st.info("👁️ Vision: AECIF-Net + Area Calc")
+
+    # 🌟 按照你的建议修改命名
+    st.success("🗺️ Planner: Gemini 2.5")  # 负责 JSON 规划
+    st.success("🧠 Reasoning: Gemini 2.5")  # 负责 报告分析
+    st.info("👁️ Vision: AECIF-Net")
 
     st.divider()
     debug_mode = st.checkbox("🔬 Diagnostic Mode", value=True)
-    st.caption("v9.5 - Area Calculation Restored")
+    st.caption("Beta Version")
 
 # ==========================================
 # 2. Backend Logic
@@ -76,6 +78,9 @@ def clean_json_string(text):
 
 
 def business_logic_refine(plan, query):
+    """
+    🏢 业务逻辑兜底 (Business Rules)
+    """
     q = query.lower()
 
     # 规则 1: Overview 必须查 Rust
@@ -111,13 +116,12 @@ def business_logic_refine(plan, query):
         plan['target_layers'] = [{"type": "elements", "id": i, "name": name} for i, name in ELEMENT_MAP.items()]
         plan['constraint_layers'] = []
 
-        # 规则 5: 约束清洗
+        # 规则 5: 约束清洗 (防止过度联想)
     spatial_prepositions = [" on ", " in ", " within ", " inside ", " atop "]
     has_spatial = any(prep in f" {q} " for prep in spatial_prepositions)
 
-    # 特殊逻辑: Rust on Bearing
+    # 特殊逻辑: Rust on Bearing (只有在有介词时才启用约束)
     if has_spatial and detected_elements:
-        # 简单 heuristic: 如果既有 defects 又有 elements，假设 defects 是 target
         has_defects = any(d['type'] == 'defects' for d in detected_elements)
         has_elems = any(d['type'] == 'elements' for d in detected_elements)
 
@@ -132,10 +136,11 @@ def business_logic_refine(plan, query):
     return plan
 
 
-def ask_gemini_plan_with_retry(query):
+def ask_gemini_planner(query):  # 重命名函数，名副其实
+    """Step 1: Planner (负责生成 JSON)"""
     models = get_best_model()
     base_prompt = """
-    Role: Bridge Inspection Orchestrator. Task: Convert user query to JSON.
+    Role: Bridge Inspection Planner. Task: Convert user query to JSON.
     Output JSON Schema: {"intent": "visualize"|"detect_defects"|"chat", "reply": "str", "target_layers": [], "constraint_layers": []}
     """
     log_buffer = ""
@@ -148,7 +153,7 @@ def ask_gemini_plan_with_retry(query):
                 plan = json.loads(draft_text)
                 if "intent" not in plan: raise ValueError("Missing 'intent'")
                 final_plan = business_logic_refine(plan, query)
-                log_buffer += f"✅ Model {model_name} succeeded.\n"
+                log_buffer += f"✅ Planner ({model_name}) succeeded.\n"
                 return final_plan, log_buffer
             except Exception as e:
                 log_buffer += f"⚠️ {model_name} format error. Retrying...\n"
@@ -160,7 +165,7 @@ def ask_gemini_plan_with_retry(query):
 
 def keyword_rescue(query, previous_logs):
     q = query.lower()
-    log = previous_logs + "\n💀 AI failed. Using Keyword Rescue."
+    log = previous_logs + "\n💀 Planner failed. Using Keyword Rescue."
     dummy = {"intent": "visualize", "target_layers": [], "constraint_layers": []}
     rescued = business_logic_refine(dummy, query)
     if rescued['target_layers']: return rescued, log
@@ -168,7 +173,8 @@ def keyword_rescue(query, previous_logs):
             "constraint_layers": []}, log
 
 
-def generate_expert_response(query, stats, image, intent):
+def generate_reasoning_response(query, stats, image, intent):  # 重命名函数
+    """Step 3: Reasoning (负责深度分析)"""
     models = get_best_model()
 
     if intent == 'visualize':
@@ -186,7 +192,7 @@ def generate_expert_response(query, stats, image, intent):
         User Query: "{query}"
         [Sensor Data]: {stats}
         [TASK]
-        Senior Bridge Inspector Report.
+        Senior Bridge Inspector Reasoning.
         1. Direct Answer.
         2. Integrate visual & sensor data (Quote the percentage coverage!).
         3. NO mention of "crops".
@@ -199,7 +205,7 @@ def generate_expert_response(query, stats, image, intent):
             return res.text
         except:
             continue
-    return "Expert Error: All models failed."
+    return "Reasoning Error: All models failed."
 
 
 def process_vision_smart(hrnet, image_pil, plan, debug=False):
@@ -230,13 +236,12 @@ def process_vision_smart(hrnet, image_pil, plan, debug=False):
             contours, _ = cv2.findContours(roi_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             cv2.drawContours(res_img, contours, -1, (255, 255, 255), 1)
 
-    # 2. 目标层 + 🔥 面积计算 (Area Calc)
-    found_info = []  # 存详细信息： "Rust (5.2%)"
+    # 2. 目标层 + 面积计算
+    found_info = []
     legend = []
 
-    # 计算分母：如果有 ROI，分母就是 ROI 的面积；否则是整张图的面积
     total_area = np.sum(roi_mask) if roi_mask is not None else (h * w)
-    if total_area == 0: total_area = 1  # 防止除以0
+    if total_area == 0: total_area = 1
 
     for item in targets:
         tid = item.get('id')
@@ -263,7 +268,6 @@ def process_vision_smart(hrnet, image_pil, plan, debug=False):
         pixel_count = np.sum(curr_mask)
         rgb = hrnet.colors_1[tid] if ttype == 'defects' else hrnet.colors[tid]
 
-        # 🔥 计算占比
         ratio = (pixel_count / total_area) * 100
 
         if debug and raw_pixels > 0:
@@ -271,9 +275,7 @@ def process_vision_smart(hrnet, image_pil, plan, debug=False):
             st.sidebar.text(f"{correct_name}: {raw_pixels}px -> {status}")
 
         if pixel_count > 0:
-            # 将百分比写入统计信息，喂给 Gemini
             found_info.append(f"{correct_name}: {ratio:.2f}% coverage")
-
             canvas[curr_mask > 0] = rgb
             mask_bool = np.logical_or(mask_bool, curr_mask > 0)
             if correct_name not in [l[0] for l in legend]: legend.append((correct_name, rgb))
@@ -323,9 +325,9 @@ with col2:
             st.markdown(msg["content"])
             if msg.get("img") is not None: st.image(msg["img"])
             if msg.get("log"):
-                with st.expander("🛠️ Correction Log"): st.text(msg["log"])
+                with st.expander("🛠️ Log"): st.text(msg["log"])
 
-    if up_file and (query := st.chat_input("Ex: What is the area of rust?")):
+    if up_file and (query := st.chat_input("Ex: Give me an overview")):
         st.session_state['history'].append({"role": "user", "content": query})
         with chat_box.chat_message("user"):
             st.markdown(query)
@@ -333,11 +335,11 @@ with col2:
         with chat_box.chat_message("assistant"):
             status = st.empty()
 
-            # Step 1: Plan
-            status.markdown("🧠 *Planning...*")
-            plan, log = ask_gemini_plan_with_retry(query)
+            # Step 1: Planner
+            status.markdown("🧠 *Planner is Thinking...*")
+            plan, log = ask_gemini_planner(query)
 
-            with st.expander("🛠️ Correction Log"):
+            with st.expander("🛠️ Planner Log"):
                 st.text(log)
 
             if plan['intent'] == 'chat':
@@ -346,16 +348,16 @@ with col2:
                 st.session_state['history'].append({"role": "assistant", "content": reply, "log": log})
             else:
                 # Step 2: Vision
-                status.markdown("👁️ *Scanning & Calculating...*")
+                status.markdown("👁️ *Vision System Scanning...*")
                 res_img, stats, legend = process_vision_smart(hrnet, st.session_state['img'], plan, debug=debug_mode)
 
-                # Step 3: Expert
-                status.markdown("📝 *Writing Report...*")
-                reply = generate_expert_response(query, stats, st.session_state['img'], plan['intent'])
+                # Step 3: Reasoning
+                status.markdown("📝 *Reasoning Engine Analyzing...*")
+                reply = generate_reasoning_response(query, stats, st.session_state['img'], plan['intent'])
 
                 status.markdown(reply)
 
-                # 显示控制
+                # Display Logic
                 show_img = (plan['intent'] == 'visualize')
                 if show_img:
                     st.image(res_img)
