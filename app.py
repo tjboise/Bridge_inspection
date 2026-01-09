@@ -9,7 +9,7 @@ import google.generativeai as genai
 from AECIF_Net import HRnet_Segmentation
 
 # ==========================================
-# 1. Page Setup (老大，必须排第一)
+# 1. Page Setup
 # ==========================================
 st.set_page_config(
     page_title="Bridge Inspection Dashboard",
@@ -34,13 +34,28 @@ with st.sidebar:
     st.success("🧠 Planner: Gemini 2.5 Flash")
     st.success("🕵️ Expert: Gemini 2.5 Flash")
     st.info("👁️ Vision: AECIF-Net")
-    st.divider()
-    st.caption("v6.5 - Natural Report Style")
 
+    st.divider()
+    debug_mode = st.checkbox("🔬 Diagnostic Mode", value=True, help="See internal logs")
+    st.caption("v7.1 - Fix Constraint Conflict")
 
 # ==========================================
 # 2. Backend Logic
 # ==========================================
+
+ELEMENT_MAP = {
+    1: "Bearing",
+    2: "Bracing",
+    3: "Deck",
+    4: "Floor Beam",
+    5: "Girder",
+    6: "Pier"
+}
+
+DEFECT_MAP = {
+    1: "Rust"
+}
+
 
 @st.cache_resource
 def load_model():
@@ -62,11 +77,11 @@ def get_best_model():
 
 def refine_plan(query, plan):
     """
-    🚑 规则修正器：防止 LLM 漏检关键病害
+    🚑 规则修正器 v2
     """
     q = query.lower()
 
-    # 规则 1：如果问 "Overview" 或 "Defects"，必须查 Rust
+    # 规则 1：Overview 必须查 Rust
     keywords = ["overview", "defect", "summary", "problem", "condition", "check"]
     if any(k in q for k in keywords):
         if plan['intent'] != 'detect_defects':
@@ -78,17 +93,12 @@ def refine_plan(query, plan):
             targets.append({"type": "defects", "id": 1, "name": "Rust"})
             plan['target_layers'] = targets
 
-    # 规则 2：如果问 "All elements"，必须展开列表
+    # 规则 2：All elements 展开 + 🔥 强制清空约束
+    # 既然用户想看“全部”，就绝对不能有 Constraint 限制！
     if "all element" in q or "everything" in q:
         plan['intent'] = 'visualize'
-        plan['target_layers'] = [
-            {"type": "elements", "id": 1, "name": "Bearing"},
-            {"type": "elements", "id": 2, "name": "Bracing"},
-            {"type": "elements", "id": 3, "name": "Deck"},
-            {"type": "elements", "id": 4, "name": "Floor Beam"},
-            {"type": "elements", "id": 5, "name": "Girder"},
-            {"type": "elements", "id": 6, "name": "Pier"}
-        ]
+        plan['target_layers'] = [{"type": "elements", "id": i, "name": name} for i, name in ELEMENT_MAP.items()]
+        plan['constraint_layers'] = []  # 👈 关键修复：把“紧箍咒”摘掉！
 
     return plan
 
@@ -98,15 +108,10 @@ def ask_gemini_plan(query):
     model_candidates = get_best_model()
 
     system_prompt = """
-    You are the orchestration brain. Translate user queries into JSON.
-
-    **Logic:**
+    Translate user queries into JSON.
     1. "visualize": User wants to SEE/LOCATE.
-    2. "detect_defects": User wants REPORT/ASSESSMENT.
-       - "Overview", "Summary" -> intent: detect_defects.
-       - ALWAYS include Rust (ID 1) in targets.
-
-    **Output JSON ONLY.**
+    2. "detect_defects": User wants REPORT. ALWAYS include Rust (ID 1).
+    Output JSON ONLY.
     Schema: {
       "intent": "visualize" | "detect_defects" | "chat",
       "reply": "Only for chat",
@@ -124,7 +129,6 @@ def ask_gemini_plan(query):
             e = content.rfind('}')
             if s != -1 and e != -1:
                 raw_plan = json.loads(content[s:e + 1])
-                # 🌟 调用修正器
                 final_plan = refine_plan(query, raw_plan)
                 return final_plan, f"**Gemini Plan:**\n{json.dumps(final_plan, indent=2)}"
         except:
@@ -141,19 +145,13 @@ def generate_expert_response(query, stats, image, intent):
     if intent == 'visualize':
         prompt = f"User asked: '{query}'. CNN found: {stats}. Briefly confirm location (1 sentence). No full report."
     else:
-        # 🌟 核心修改：让回答更自然，不要强制分段
         prompt = f"""
         User Query: "{query}"
-
         [Sensor Data Reference]: {stats}
-        (Note: If CNN found nothing, it might be a false negative. Use your vision.)
-
         [Task]: Act as a Senior Bridge Inspector.
-        - **Direct Answer**: Address the user's specific question directly.
-        - **Holistic View**: Provide a comprehensive visual assessment of the bridge condition (check for rust, cracks, spalling, etc.).
-        - **Data Integration**: Incorporate the "Sensor Data" NATURALLY into your narrative to support your observations. 
-          - ❌ DO NOT create a separate "Sensor Data" section unless specifically asked for measurements.
-          - ✅ Example: "Visual inspection reveals significant corrosion on the girder, which is confirmed by sensors detecting 5% rust coverage."
+        - Direct Answer.
+        - Holistic View.
+        - Integrate Sensor Data NATURALLY.
         """
 
     for model_name in model_candidates:
@@ -166,12 +164,19 @@ def generate_expert_response(query, stats, image, intent):
     return "Expert Error: All models failed."
 
 
-def process_vision_smart(hrnet, image_pil, plan):
+def process_vision_smart(hrnet, image_pil, plan, debug=False):
     if plan.get('intent') == 'chat': return None, "", []
 
     img_cv = cv2.cvtColor(np.array(image_pil), cv2.COLOR_RGB2BGR)
     h, w = img_cv.shape[:2]
     mask_e, mask_d = hrnet.get_raw_masks(image_pil)
+
+    # 🔬 详细诊断日志
+    debug_info = []
+    if debug:
+        unique_e = np.unique(mask_e)
+        st.sidebar.warning(f"🔎 Raw IDs in Elements Mask: {unique_e}")
+        debug_info.append(f"Map raw: {unique_e}")
 
     res_img = cv2.cvtColor(img_cv, cv2.COLOR_BGR2RGB)
     canvas = np.zeros_like(res_img)
@@ -180,7 +185,7 @@ def process_vision_smart(hrnet, image_pil, plan):
     targets = plan.get('target_layers', [])
     constraints = plan.get('constraint_layers', [])
 
-    # 1. 约束层处理
+    # 1. 约束层
     roi_mask = None
     if constraints:
         roi_mask = np.zeros((h, w), dtype=np.uint8)
@@ -192,25 +197,35 @@ def process_vision_smart(hrnet, image_pil, plan):
             else:
                 roi_mask = cv2.bitwise_or(roi_mask, (mask_e == cid).astype(np.uint8))
 
+        # 调试：如果有约束，显示出来
+        if debug and np.sum(roi_mask) > 0:
+            st.sidebar.info(f"🔒 Constraint Mask Active! Area: {np.sum(roi_mask)} px")
+
         if np.sum(roi_mask) > 0:
             contours, _ = cv2.findContours(roi_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             cv2.drawContours(res_img, contours, -1, (255, 255, 255), 1)
 
-    # 2. 目标层处理
+    # 2. 目标层
     found = []
     legend = []
     target_names_checked = []
 
     for item in targets:
         tid = item.get('id')
-        name = item.get('name', 'Unknown')
         if tid is None: continue
 
-        target_names_checked.append(name)
-
+        # 强制修正名称
+        correct_name = "Unknown"
         ttype = item.get('type')
-        if not ttype:
-            ttype = 'defects' if name.lower() in ['rust', 'corrosion'] else 'elements'
+
+        if tid in DEFECT_MAP and (ttype == 'defects' or 'rust' in item.get('name', '').lower()):
+            ttype = 'defects'
+            correct_name = DEFECT_MAP[tid]
+        elif tid in ELEMENT_MAP:
+            ttype = 'elements'
+            correct_name = ELEMENT_MAP[tid]
+
+        target_names_checked.append(correct_name)
 
         if ttype == 'elements':
             curr_mask = (mask_e == tid).astype(np.uint8)
@@ -219,15 +234,23 @@ def process_vision_smart(hrnet, image_pil, plan):
             curr_mask = (mask_d == tid).astype(np.uint8)
             rgb = hrnet.colors_1[tid] if tid < len(hrnet.colors_1) else (0, 0, 255)
 
+        # 🌟 核心调试：记录遮罩前的像素数
+        raw_pixels = np.sum(curr_mask)
+
         if roi_mask is not None:
             curr_mask = cv2.bitwise_and(curr_mask, roi_mask)
 
-        pixel_count = np.sum(curr_mask)
-        if pixel_count > 0:
-            found.append(f"{name}")
+        final_pixels = np.sum(curr_mask)
+
+        if debug and raw_pixels > 0:
+            status = "✅ Kept" if final_pixels > 0 else "❌ Filtered by Constraint"
+            st.sidebar.text(f"Checking {correct_name} (ID {tid}): {raw_pixels}px -> {status}")
+
+        if final_pixels > 0:
+            found.append(f"{correct_name}")
             canvas[curr_mask > 0] = rgb
             mask_bool = np.logical_or(mask_bool, curr_mask > 0)
-            if name not in [l[0] for l in legend]: legend.append((name, rgb))
+            if correct_name not in [l[0] for l in legend]: legend.append((correct_name, rgb))
 
     if found:
         mask_u8 = mask_bool.astype(np.uint8) * 255
@@ -284,7 +307,7 @@ with col2:
             if msg.get("log"):
                 with st.expander("🧠 Thought Process"): st.code(msg["log"], language="json")
 
-    if up_file and (query := st.chat_input("Ex: Give me an overview")):
+    if up_file and (query := st.chat_input("Ex: Show me all elements")):
         st.session_state['history'].append({"role": "user", "content": query})
         with chat_box.chat_message("user"):
             st.markdown(query)
@@ -303,7 +326,7 @@ with col2:
             else:
                 # Step 2: Vision
                 status.markdown("👁️ *Scanning...*")
-                res_img, stats, legend = process_vision_smart(hrnet, st.session_state['img'], plan)
+                res_img, stats, legend = process_vision_smart(hrnet, st.session_state['img'], plan, debug=debug_mode)
 
                 # Step 3: Expert
                 status.markdown("📝 *Writing Report...*")
