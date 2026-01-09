@@ -32,29 +32,19 @@ genai.configure(api_key=GOOGLE_API_KEY)
 with st.sidebar:
     st.header("⚙️ Architecture")
     st.success("🧠 Planner: Gemini 2.5 Flash")
-    st.success("🕵️ Expert: Gemini 2.5 Flash")
+    st.success("🛠️ Refiner: Self-Correction")
     st.info("👁️ Vision: AECIF-Net")
 
     st.divider()
-    debug_mode = st.checkbox("🔬 Diagnostic Mode", value=True, help="See internal logs")
-    st.caption("v7.2 - Flexible Keywords Fix")
+    debug_mode = st.checkbox("🔬 Diagnostic Mode", value=True)
+    st.caption("v8.0 - Model Self-Correction")
 
 # ==========================================
 # 2. Backend Logic
 # ==========================================
 
-ELEMENT_MAP = {
-    1: "Bearing",
-    2: "Bracing",
-    3: "Deck",
-    4: "Floor Beam",
-    5: "Girder",
-    6: "Pier"
-}
-
-DEFECT_MAP = {
-    1: "Rust"
-}
+ELEMENT_MAP = {1: "Bearing", 2: "Bracing", 3: "Deck", 4: "Floor Beam", 5: "Girder", 6: "Pier"}
+DEFECT_MAP = {1: "Rust"}
 
 
 @st.cache_resource
@@ -67,99 +57,146 @@ def load_model():
 
 
 def get_best_model():
+    # 🌟 使用你指定的最新模型列表
     return [
         'gemini-2.5-flash',
-        'gemini-3-flash',
+        'gemini-3-flash',  # 如果 2.5 搞不定，3.0 上
         'gemini-2.5-flash-lite',
-        'gemini-1.5-flash'
+        'gemma-3-12b'  # 新加入的 Gemma
     ]
 
 
-def refine_plan(query, plan):
+def clean_json_string(text):
+    """清洗 LLM 输出，去掉 markdown 和多余字符"""
+    text = text.replace("```json", "").replace("```", "").strip()
+    s = text.find('{')
+    e = text.rfind('}')
+    if s != -1 and e != -1:
+        return text[s:e + 1]
+    return text
+
+
+def business_logic_refine(plan, query):
     """
-    🚑 规则修正器 v3 (更灵活的关键词)
+    🏢 业务逻辑修正 (Business Rules)
+    这是为了兜底 LLM 可能不懂的工程规则（比如 overview 必须看锈）
     """
     q = query.lower()
 
     # 规则 1：Overview 必须查 Rust
-    keywords = ["overview", "defect", "summary", "problem", "condition", "check"]
-    if any(k in q for k in keywords):
+    if any(k in q for k in ["overview", "defect", "summary", "check", "condition"]):
         if plan['intent'] != 'detect_defects':
             plan['intent'] = 'detect_defects'
+        # 检查是否已有 Rust
+        if not any(t.get('name') == 'Rust' for t in plan.get('target_layers', [])):
+            plan.setdefault('target_layers', []).append({"type": "defects", "id": 1, "name": "Rust"})
 
-        targets = plan.get('target_layers', [])
-        has_rust = any(t.get('name') == 'Rust' for t in targets)
-        if not has_rust:
-            targets.append({"type": "defects", "id": 1, "name": "Rust"})
-            plan['target_layers'] = targets
-
-    # 规则 2：All elements 展开 (逻辑优化)
-    # 只要包含 "all" 或 "every"，并且包含 "element", "part", "component" 其中之一
-    has_all = "all" in q or "every" in q or "whole" in q
-    has_part = "element" in q or "part" in q or "component" in q or "everything" in q
-
-    if has_all and has_part:
+    # 规则 2：All elements 必须清空约束
+    if "all" in q and ("element" in q or "part" in q):
         plan['intent'] = 'visualize'
-        # 强制覆盖 targets 为所有部件
         plan['target_layers'] = [{"type": "elements", "id": i, "name": name} for i, name in ELEMENT_MAP.items()]
-        # 强制清空约束
-        plan['constraint_layers'] = []
+        plan['constraint_layers'] = []  # 强制清空约束
 
     return plan
 
 
-def ask_gemini_plan(query):
-    """Step 1: 使用 Gemini 2.5 进行规划"""
-    model_candidates = get_best_model()
+def ask_gemini_plan_with_retry(query):
+    """
+    Step 1: 规划 + 自我修正 (Self-Correction Loop)
+    """
+    models = get_best_model()
 
-    system_prompt = """
-    Translate user queries into JSON.
-    1. "visualize": User wants to SEE/LOCATE.
-    2. "detect_defects": User wants REPORT. ALWAYS include Rust (ID 1).
-    Output JSON ONLY.
-    Schema: {
+    base_prompt = """
+    Role: Bridge Inspection Orchestrator.
+    Task: Convert user query to JSON instructions.
+
+    Entities:
+    - Elements: 1:Bearing, 2:Bracing, 3:Deck, 4:Floor Beam, 5:Girder, 6:Pier
+    - Defects: 1:Rust
+
+    Logic:
+    1. "visualize": User wants to SEE/LOCATE. 
+    2. "detect_defects": User wants REPORT/ASSESSMENT.
+
+    Output JSON Schema:
+    {
       "intent": "visualize" | "detect_defects" | "chat",
-      "reply": "Only for chat",
-      "target_layers": [{"type": "elements"|"defects", "id": int, "name": str}],
+      "reply": "str (only for chat)",
+      "target_layers": [{"type": "elements"|"defects", "id": int, "name": "str"}],
       "constraint_layers": [{"type": "elements"|"defects", "id": int}]
     }
     """
 
-    for model_name in model_candidates:
-        try:
-            model = genai.GenerativeModel(model_name)
-            response = model.generate_content(system_prompt + f"\nUser Query: {query}")
-            content = response.text.replace("```json", "").replace("```", "").strip()
-            s = content.find('{');
-            e = content.rfind('}')
-            if s != -1 and e != -1:
-                raw_plan = json.loads(content[s:e + 1])
-                final_plan = refine_plan(query, raw_plan)
-                return final_plan, f"**Gemini Plan:**\n{json.dumps(final_plan, indent=2)}"
-        except:
-            continue
+    log_buffer = ""
 
-    fallback = {"intent": "detect_defects", "target_layers": [{"type": "defects", "id": 1, "name": "Rust"}]}
-    return fallback, "⚠️ Plan Error, defaulting to Rust check."
+    for model_name in models:
+        try:
+            # --- 第一次尝试 (Draft) ---
+            model = genai.GenerativeModel(model_name)
+            response = model.generate_content(base_prompt + f"\nUser Query: {query}")
+            draft_text = clean_json_string(response.text)
+
+            try:
+                # 尝试解析
+                plan = json.loads(draft_text)
+                # 简单校验字段
+                if "intent" not in plan: raise ValueError("Missing 'intent' key")
+
+                # ✅ 成功：进入业务规则修正
+                final_plan = business_logic_refine(plan, query)
+                log_buffer += f"✅ Model {model_name} succeeded.\nPlan: {json.dumps(final_plan)}"
+                return final_plan, log_buffer
+
+            except Exception as parse_error:
+                # ❌ 失败：触发自我修正 (Refine Step)
+                log_buffer += f"⚠️ Model {model_name} draft failed: {parse_error}. Triggering Self-Correction...\n"
+
+                refine_prompt = f"""
+                You are a JSON fixer. The previous JSON you generated was invalid or incorrect.
+
+                User Query: {query}
+                Your Previous Output: {draft_text}
+                Error Message: {str(parse_error)}
+
+                Fix the JSON. Output VALID JSON ONLY. No markdown.
+                """
+
+                # 让同一个模型再试一次 (Self-Correction)
+                response_2 = model.generate_content(refine_prompt)
+                fixed_text = clean_json_string(response_2.text)
+
+                plan = json.loads(fixed_text)  # 如果这次还挂，就抛出异常，换下一个模型
+                final_plan = business_logic_refine(plan, query)
+
+                log_buffer += f"✅ Self-Correction successful!\nFixed Plan: {json.dumps(final_plan)}"
+                return final_plan, log_buffer
+
+        except Exception as e:
+            log_buffer += f"❌ Model {model_name} crashed: {str(e)}\n"
+            continue  # 换下一个模型
+
+    # 所有模型都挂了，兜底
+    return {
+        "intent": "detect_defects",
+        "target_layers": [{"type": "defects", "id": 1, "name": "Rust"}],
+        "constraint_layers": []
+    }, log_buffer + "\n💀 All models failed. Defaulting to Rust check."
 
 
 def generate_expert_response(query, stats, image, intent):
-    """Step 3: Gemini 2.5 生成最终报告"""
-    model_candidates = get_best_model()
+    """Step 3: Expert (使用列表中的第一个可用模型)"""
+    models = get_best_model()
 
-    if intent == 'visualize':
-        prompt = f"User asked: '{query}'. CNN found: {stats}. Briefly confirm location (1 sentence). No full report."
-    else:
-        prompt = f"""
-        User Query: "{query}"
-        [Sensor Data Reference]: {stats}
-        [Task]: Act as a Senior Bridge Inspector.
-        - Direct Answer.
-        - Holistic View.
-        - Integrate Sensor Data NATURALLY.
-        """
+    prompt = f"""
+    User Query: "{query}"
+    [Sensor Data]: {stats}
+    [Task]: Senior Bridge Inspector. 
+    - Keep it professional.
+    - If intent is visualize, just confirm location.
+    - If intent is detect_defects, analyze Rust/Cracks/Spalling based on image + sensor.
+    """
 
-    for model_name in model_candidates:
+    for model_name in models:
         try:
             model = genai.GenerativeModel(model_name)
             res = model.generate_content([prompt, image])
@@ -176,10 +213,9 @@ def process_vision_smart(hrnet, image_pil, plan, debug=False):
     h, w = img_cv.shape[:2]
     mask_e, mask_d = hrnet.get_raw_masks(image_pil)
 
-    # 🔬 详细诊断日志
     if debug:
         unique_e = np.unique(mask_e)
-        st.sidebar.warning(f"🔎 Raw IDs in Elements Mask: {unique_e}")
+        st.sidebar.warning(f"🔎 Raw IDs: {unique_e}")
 
     res_img = cv2.cvtColor(img_cv, cv2.COLOR_BGR2RGB)
     canvas = np.zeros_like(res_img)
@@ -195,10 +231,8 @@ def process_vision_smart(hrnet, image_pil, plan, debug=False):
         for c in constraints:
             cid = c.get('id')
             if cid is None: continue
-            if c.get('type') == 'defects':
-                roi_mask = cv2.bitwise_or(roi_mask, (mask_d == cid).astype(np.uint8))
-            else:
-                roi_mask = cv2.bitwise_or(roi_mask, (mask_e == cid).astype(np.uint8))
+            curr = mask_d if c.get('type') == 'defects' else mask_e
+            roi_mask = cv2.bitwise_or(roi_mask, (curr == cid).astype(np.uint8))
 
         if np.sum(roi_mask) > 0:
             contours, _ = cv2.findContours(roi_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -207,47 +241,33 @@ def process_vision_smart(hrnet, image_pil, plan, debug=False):
     # 2. 目标层
     found = []
     legend = []
-    target_names_checked = []
 
     for item in targets:
         tid = item.get('id')
         if tid is None: continue
 
-        # 强制修正名称
-        correct_name = "Unknown"
+        # 强制修正 ID 对应的名字 (防止幻觉)
+        correct_name = item.get('name', 'Unknown')
         ttype = item.get('type')
 
-        if tid in DEFECT_MAP and (ttype == 'defects' or 'rust' in item.get('name', '').lower()):
+        if tid in DEFECT_MAP and (ttype == 'defects' or 'rust' in correct_name.lower()):
             ttype = 'defects'
             correct_name = DEFECT_MAP[tid]
         elif tid in ELEMENT_MAP:
             ttype = 'elements'
             correct_name = ELEMENT_MAP[tid]
 
-        target_names_checked.append(correct_name)
-
-        if ttype == 'elements':
-            curr_mask = (mask_e == tid).astype(np.uint8)
-            rgb = hrnet.colors[tid] if tid < len(hrnet.colors) else (200, 200, 200)
-        else:
-            curr_mask = (mask_d == tid).astype(np.uint8)
-            rgb = hrnet.colors_1[tid] if tid < len(hrnet.colors_1) else (0, 0, 255)
-
-        # 记录原始像素，用于Debug
-        raw_pixels = np.sum(curr_mask)
+        curr = mask_d if ttype == 'defects' else mask_e
+        curr_mask = (curr == tid).astype(np.uint8)
 
         if roi_mask is not None:
             curr_mask = cv2.bitwise_and(curr_mask, roi_mask)
 
-        final_pixels = np.sum(curr_mask)
+        pixel_count = np.sum(curr_mask)
+        rgb = hrnet.colors_1[tid] if ttype == 'defects' else hrnet.colors[tid]
 
-        # 侧边栏实时显示处理进度
-        if debug and raw_pixels > 0:
-            status = "✅ Kept" if final_pixels > 0 else "❌ Filtered by Constraint"
-            st.sidebar.text(f"Checking {correct_name} (ID {tid}): {raw_pixels}px -> {status}")
-
-        if final_pixels > 0:
-            found.append(f"{correct_name}")
+        if pixel_count > 0:
+            found.append(correct_name)
             canvas[curr_mask > 0] = rgb
             mask_bool = np.logical_or(mask_bool, curr_mask > 0)
             if correct_name not in [l[0] for l in legend]: legend.append((correct_name, rgb))
@@ -259,14 +279,7 @@ def process_vision_smart(hrnet, image_pil, plan, debug=False):
         contours, _ = cv2.findContours(mask_u8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         cv2.drawContours(res_img, contours, -1, (255, 255, 255), 2)
 
-    if found:
-        stats = f"CNN Detected: {', '.join(found)}"
-    else:
-        if target_names_checked:
-            stats = f"CNN scanned for [{', '.join(target_names_checked)}] but found 0 pixels."
-        else:
-            stats = "CNN: No specific targets were requested."
-
+    stats = f"Detected: {', '.join(found)}" if found else "No targets found."
     return res_img, stats, legend
 
 
@@ -302,12 +315,11 @@ with col2:
     for msg in st.session_state['history']:
         with chat_box.chat_message(msg["role"]):
             st.markdown(msg["content"])
-            if msg.get("img") is not None:
-                st.image(msg["img"])
+            if msg.get("img") is not None: st.image(msg["img"])
             if msg.get("log"):
-                with st.expander("🧠 Thought Process"): st.code(msg["log"], language="json")
+                with st.expander("🛠️ Correction Log"): st.text(msg["log"])
 
-    if up_file and (query := st.chat_input("Ex: Show me all elements")):
+    if up_file and (query := st.chat_input("Ex: Show me the girder")):
         st.session_state['history'].append({"role": "user", "content": query})
         with chat_box.chat_message("user"):
             st.markdown(query)
@@ -315,13 +327,12 @@ with col2:
         with chat_box.chat_message("assistant"):
             status = st.empty()
 
-            # Step 1: Gemini Plan
-            status.markdown("🧠 *Planning...*")
-            plan, log = ask_gemini_plan(query)
+            # Step 1: Gemini Plan + Retry
+            status.markdown("🧠 *Gemini Planning (Auto-Refining)...*")
+            plan, log = ask_gemini_plan_with_retry(query)
 
-            # 🌟 修复：立即显示当前的日志，不要等下一轮
-            with st.expander("🧠 Current Thought Process"):
-                st.code(log, language="json")
+            with st.expander("🛠️ Correction Log"):
+                st.text(log)  # 显示是否触发了自我修正
 
             if plan['intent'] == 'chat':
                 reply = plan.get('reply', 'Hello!')
@@ -347,5 +358,5 @@ with col2:
                     "role": "assistant",
                     "content": reply,
                     "img": res_img if show_img else None,
-                    "log": log + f"\n\nCNN Stats: {stats}"
+                    "log": log
                 })
