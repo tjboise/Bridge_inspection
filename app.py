@@ -31,13 +31,13 @@ genai.configure(api_key=GOOGLE_API_KEY)
 # 🎨 Sidebar
 with st.sidebar:
     st.header("⚙️ Architecture")
-    st.success("🧠 Planner: Gemini 2.5 Flash")
+    st.success("🧠 Planner: Gemini Auto-Switch")
     st.success("🛠️ Refiner: Self-Correction")
     st.info("👁️ Vision: AECIF-Net")
 
     st.divider()
     debug_mode = st.checkbox("🔬 Diagnostic Mode", value=True)
-    st.caption("v8.0 - Model Self-Correction")
+    st.caption("v8.1 - High Quota Backup Added")
 
 # ==========================================
 # 2. Backend Logic
@@ -57,17 +57,22 @@ def load_model():
 
 
 def get_best_model():
-    # 🌟 使用你指定的最新模型列表
+    """
+    🌟 策略调整：
+    1. 先试 2.5 Flash (最强，但每天只有20次)
+    2. 如果额度没了，自动降级到 1.5 Flash (每天1500次，抗造)
+    3. 3.0 和 Gemma 暂时放后面，因为容易 404
+    """
     return [
-        'gemini-2.5-flash',
-        'gemini-3-flash',  # 如果 2.5 搞不定，3.0 上
-        'gemini-2.5-flash-lite',
-        'gemma-3-12b'  # 新加入的 Gemma
+        'gemini-2.5-flash',  # 优先：新模型
+        'gemini-1.5-flash',  # 🔥 救命稻草：额度高，稳如老狗
+        'gemini-2.5-flash-lite',  # 备选
+        'gemini-3-flash',  # 尝鲜
+        'gemma-3-12b'  # 尝鲜
     ]
 
 
 def clean_json_string(text):
-    """清洗 LLM 输出，去掉 markdown 和多余字符"""
     text = text.replace("```json", "").replace("```", "").strip()
     s = text.find('{')
     e = text.rfind('}')
@@ -78,8 +83,7 @@ def clean_json_string(text):
 
 def business_logic_refine(plan, query):
     """
-    🏢 业务逻辑修正 (Business Rules)
-    这是为了兜底 LLM 可能不懂的工程规则（比如 overview 必须看锈）
+    🏢 业务逻辑修正
     """
     q = query.lower()
 
@@ -87,22 +91,31 @@ def business_logic_refine(plan, query):
     if any(k in q for k in ["overview", "defect", "summary", "check", "condition"]):
         if plan['intent'] != 'detect_defects':
             plan['intent'] = 'detect_defects'
-        # 检查是否已有 Rust
-        if not any(t.get('name') == 'Rust' for t in plan.get('target_layers', [])):
-            plan.setdefault('target_layers', []).append({"type": "defects", "id": 1, "name": "Rust"})
+
+        # 修复 target_layers 可能不存在的情况
+        targets = plan.get('target_layers', [])
+        if not targets: targets = []
+
+        if not any(t.get('name') == 'Rust' for t in targets):
+            targets.append({"type": "defects", "id": 1, "name": "Rust"})
+
+        plan['target_layers'] = targets
 
     # 规则 2：All elements 必须清空约束
-    if "all" in q and ("element" in q or "part" in q):
+    has_all = "all" in q or "every" in q or "whole" in q
+    has_part = "element" in q or "part" in q or "component" in q
+
+    if has_all and has_part:
         plan['intent'] = 'visualize'
         plan['target_layers'] = [{"type": "elements", "id": i, "name": name} for i, name in ELEMENT_MAP.items()]
-        plan['constraint_layers'] = []  # 强制清空约束
+        plan['constraint_layers'] = []
 
     return plan
 
 
 def ask_gemini_plan_with_retry(query):
     """
-    Step 1: 规划 + 自我修正 (Self-Correction Loop)
+    Step 1: 规划 + 自我修正 + 自动切换模型
     """
     models = get_best_model()
 
@@ -137,54 +150,80 @@ def ask_gemini_plan_with_retry(query):
             draft_text = clean_json_string(response.text)
 
             try:
-                # 尝试解析
                 plan = json.loads(draft_text)
-                # 简单校验字段
-                if "intent" not in plan: raise ValueError("Missing 'intent' key")
+                if "intent" not in plan: raise ValueError("Missing 'intent'")
 
-                # ✅ 成功：进入业务规则修正
                 final_plan = business_logic_refine(plan, query)
-                log_buffer += f"✅ Model {model_name} succeeded.\nPlan: {json.dumps(final_plan)}"
+                log_buffer += f"✅ Model {model_name} succeeded.\n"
                 return final_plan, log_buffer
 
             except Exception as parse_error:
-                # ❌ 失败：触发自我修正 (Refine Step)
-                log_buffer += f"⚠️ Model {model_name} draft failed: {parse_error}. Triggering Self-Correction...\n"
+                # ❌ 格式错误：触发自我修正
+                log_buffer += f"⚠️ Model {model_name} draft format error. Fixing...\n"
 
                 refine_prompt = f"""
-                You are a JSON fixer. The previous JSON you generated was invalid or incorrect.
-
-                User Query: {query}
-                Your Previous Output: {draft_text}
-                Error Message: {str(parse_error)}
-
-                Fix the JSON. Output VALID JSON ONLY. No markdown.
+                Fix this JSON. Error: {str(parse_error)}
+                Input: {draft_text}
+                Output VALID JSON ONLY.
                 """
-
-                # 让同一个模型再试一次 (Self-Correction)
                 response_2 = model.generate_content(refine_prompt)
                 fixed_text = clean_json_string(response_2.text)
 
-                plan = json.loads(fixed_text)  # 如果这次还挂，就抛出异常，换下一个模型
+                plan = json.loads(fixed_text)
                 final_plan = business_logic_refine(plan, query)
 
-                log_buffer += f"✅ Self-Correction successful!\nFixed Plan: {json.dumps(final_plan)}"
+                log_buffer += f"✅ {model_name} Self-Correction successful!\n"
                 return final_plan, log_buffer
 
         except Exception as e:
-            log_buffer += f"❌ Model {model_name} crashed: {str(e)}\n"
-            continue  # 换下一个模型
+            # 捕获 API 错误 (429 Quota, 404 Not Found)
+            err_msg = str(e)
+            if "429" in err_msg:
+                log_buffer += f"❌ {model_name}: Quota Exceeded (Limit 20/day). Switching...\n"
+            elif "404" in err_msg:
+                log_buffer += f"❌ {model_name}: Not Found/Version Error. Switching...\n"
+            else:
+                log_buffer += f"❌ {model_name}: Error {err_msg[:50]}... Switching...\n"
+            continue
 
-    # 所有模型都挂了，兜底
+            # 所有模型都挂了，启动关键词急救
+    return keyword_rescue(query, log_buffer)
+
+
+def keyword_rescue(query, previous_logs):
+    """
+    🚑 最后的防线：关键词匹配
+    """
+    q = query.lower()
+    log = previous_logs + "\n💀 All AI models failed. Using Keyword Rescue."
+
+    # 1. 抢救 Overview
+    if any(k in q for k in ["overview", "defect", "summary", "problem"]):
+        return {
+            "intent": "detect_defects",
+            "target_layers": [{"type": "defects", "id": 1, "name": "Rust"}],
+            "constraint_layers": []
+        }, log
+
+    # 2. 抢救部件
+    for eid, name in ELEMENT_MAP.items():
+        if name.lower() in q:
+            return {
+                "intent": "visualize",
+                "target_layers": [{"type": "elements", "id": eid, "name": name}],
+                "constraint_layers": []
+            }, log
+
+    # 3. 默认查锈
     return {
         "intent": "detect_defects",
         "target_layers": [{"type": "defects", "id": 1, "name": "Rust"}],
         "constraint_layers": []
-    }, log_buffer + "\n💀 All models failed. Defaulting to Rust check."
+    }, log
 
 
 def generate_expert_response(query, stats, image, intent):
-    """Step 3: Expert (使用列表中的第一个可用模型)"""
+    """Step 3: Expert (也加入自动切换)"""
     models = get_best_model()
 
     prompt = f"""
@@ -193,7 +232,7 @@ def generate_expert_response(query, stats, image, intent):
     [Task]: Senior Bridge Inspector. 
     - Keep it professional.
     - If intent is visualize, just confirm location.
-    - If intent is detect_defects, analyze Rust/Cracks/Spalling based on image + sensor.
+    - If intent is detect_defects, analyze Rust/Cracks/Spalling.
     """
 
     for model_name in models:
@@ -203,7 +242,7 @@ def generate_expert_response(query, stats, image, intent):
             return res.text
         except:
             continue
-    return "Expert Error: All models failed."
+    return "Expert Error: All models failed (Quota exceeded)."
 
 
 def process_vision_smart(hrnet, image_pil, plan, debug=False):
@@ -246,7 +285,6 @@ def process_vision_smart(hrnet, image_pil, plan, debug=False):
         tid = item.get('id')
         if tid is None: continue
 
-        # 强制修正 ID 对应的名字 (防止幻觉)
         correct_name = item.get('name', 'Unknown')
         ttype = item.get('type')
 
@@ -328,11 +366,11 @@ with col2:
             status = st.empty()
 
             # Step 1: Gemini Plan + Retry
-            status.markdown("🧠 *Gemini Planning (Auto-Refining)...*")
+            status.markdown("🧠 *Gemini Planning (Checking Quota)...*")
             plan, log = ask_gemini_plan_with_retry(query)
 
             with st.expander("🛠️ Correction Log"):
-                st.text(log)  # 显示是否触发了自我修正
+                st.text(log)
 
             if plan['intent'] == 'chat':
                 reply = plan.get('reply', 'Hello!')
