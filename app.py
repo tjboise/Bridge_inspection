@@ -33,11 +33,11 @@ with st.sidebar:
     st.header("⚙️ Architecture")
     st.success("🧠 Planner: Gemini Auto-Switch")
     st.success("📐 Refiner: Spatial Logic Aware")
-    st.info("👁️ Vision: AECIF-Net")
+    st.info("👁️ Vision: AECIF-Net + Area Calc")
 
     st.divider()
     debug_mode = st.checkbox("🔬 Diagnostic Mode", value=True)
-    st.caption("v9.4 - 'Rust ON Bearing' Fix")
+    st.caption("v9.5 - Area Calculation Restored")
 
 # ==========================================
 # 2. Backend Logic
@@ -76,61 +76,34 @@ def clean_json_string(text):
 
 
 def business_logic_refine(plan, query):
-    """
-    📐 空间逻辑感知修正
-    """
     q = query.lower()
 
-    # --- 1. 意图修正 ---
+    # 规则 1: Overview 必须查 Rust
     if any(k in q for k in ["overview", "defect", "summary", "check", "condition"]):
         if plan['intent'] != 'detect_defects': plan['intent'] = 'detect_defects'
-        # Overview 必须查 Rust
         targets = plan.get('target_layers', [])
         if not targets: targets = []
         if not any(t.get('name') == 'Rust' for t in targets):
             targets.append({"type": "defects", "id": 1, "name": "Rust"})
         plan['target_layers'] = targets
 
+    # 规则 2: Show/Segment -> Visualize
     if any(k in q for k in ["show", "see", "visual", "segment", "highlight", "draw"]):
         plan['intent'] = 'visualize'
 
-    # --- 2. 实体提取 & 空间分配 (Spatial Distribution) ---
-    found_elements = []
-    found_defects = []
-
-    # 扫描部件
+    # 规则 3: 实体 ID 强行锁定
+    detected_elements = []
     for eid, name in ELEMENT_MAP.items():
         if name.lower() in q or name.lower() + "s" in q:
-            found_elements.append({"type": "elements", "id": eid, "name": name})
-
-    # 扫描病害
+            detected_elements.append({"type": "elements", "id": eid, "name": name})
     if "rust" in q or "corrosion" in q:
-        found_defects.append({"type": "defects", "id": 1, "name": "Rust"})
+        detected_elements.append({"type": "defects", "id": 1, "name": "Rust"})
 
-    # 检测空间介词
-    spatial_prepositions = [" on ", " in ", " within ", " inside ", " atop "]
-    has_spatial = any(prep in f" {q} " for prep in spatial_prepositions)
+    if detected_elements and not ("all" in q and ("element" in q or "part" in q)):
+        plan['target_layers'] = detected_elements
+        if plan['intent'] != 'detect_defects': plan['intent'] = 'visualize'
 
-    # 🔥 核心逻辑：智能分配 Target 和 Constraint
-    if (found_elements or found_defects) and not ("all" in q and "element" in q):
-        # 只有在不是 "All elements" 的情况下才介入
-
-        if has_spatial and found_defects and found_elements:
-            # Case: "Rust ON Bearing"
-            # 逻辑：把病害作为 Target，把部件作为 Constraint
-            plan['target_layers'] = found_defects
-            plan['constraint_layers'] = found_elements
-            # 如果意图模糊，强制转 visualize，因为用户想看 specific location
-            if plan['intent'] == 'chat': plan['intent'] = 'visualize'
-
-        else:
-            # Case: "Show Bearing" 或 "Show Rust" (无空间关系，或者只有一类实体)
-            # 逻辑：全部展示，无约束
-            plan['target_layers'] = found_defects + found_elements
-            plan['constraint_layers'] = []
-
-    # --- 3. 全量显示 (All elements) ---
-    # 这个优先级最高，覆盖上面的逻辑
+    # 规则 4: 全量显示
     has_all = "all" in q or "every" in q or "whole" in q
     has_part = "element" in q or "part" in q or "component" in q
     if has_all and has_part:
@@ -138,22 +111,32 @@ def business_logic_refine(plan, query):
         plan['target_layers'] = [{"type": "elements", "id": i, "name": name} for i, name in ELEMENT_MAP.items()]
         plan['constraint_layers'] = []
 
+        # 规则 5: 约束清洗
+    spatial_prepositions = [" on ", " in ", " within ", " inside ", " atop "]
+    has_spatial = any(prep in f" {q} " for prep in spatial_prepositions)
+
+    # 特殊逻辑: Rust on Bearing
+    if has_spatial and detected_elements:
+        # 简单 heuristic: 如果既有 defects 又有 elements，假设 defects 是 target
+        has_defects = any(d['type'] == 'defects' for d in detected_elements)
+        has_elems = any(d['type'] == 'elements' for d in detected_elements)
+
+        if has_defects and has_elems:
+            plan['target_layers'] = [d for d in detected_elements if d['type'] == 'defects']
+            plan['constraint_layers'] = [d for d in detected_elements if d['type'] == 'elements']
+        elif not has_spatial:
+            plan['constraint_layers'] = []
+    elif not has_spatial:
+        plan['constraint_layers'] = []
+
     return plan
 
 
 def ask_gemini_plan_with_retry(query):
     models = get_best_model()
-
     base_prompt = """
-    Role: Bridge Inspection Orchestrator.
-    Task: Convert user query to JSON.
-    Output JSON Schema:
-    {
-      "intent": "visualize" | "detect_defects" | "chat",
-      "reply": "str",
-      "target_layers": [{"type": "elements"|"defects", "id": int, "name": "str"}],
-      "constraint_layers": [{"type": "elements"|"defects", "id": int}]
-    }
+    Role: Bridge Inspection Orchestrator. Task: Convert user query to JSON.
+    Output JSON Schema: {"intent": "visualize"|"detect_defects"|"chat", "reply": "str", "target_layers": [], "constraint_layers": []}
     """
     log_buffer = ""
     for model_name in models:
@@ -164,40 +147,28 @@ def ask_gemini_plan_with_retry(query):
             try:
                 plan = json.loads(draft_text)
                 if "intent" not in plan: raise ValueError("Missing 'intent'")
-
-                # 🔥 调用空间感知修正逻辑
                 final_plan = business_logic_refine(plan, query)
                 log_buffer += f"✅ Model {model_name} succeeded.\n"
                 return final_plan, log_buffer
-            except Exception as parse_error:
+            except Exception as e:
                 log_buffer += f"⚠️ {model_name} format error. Retrying...\n"
                 continue
         except Exception as e:
             continue
-
     return keyword_rescue(query, log_buffer)
 
 
 def keyword_rescue(query, previous_logs):
     q = query.lower()
     log = previous_logs + "\n💀 AI failed. Using Keyword Rescue."
-
-    # 复用 spatial logic
-    dummy_plan = {"intent": "visualize", "target_layers": [], "constraint_layers": []}
-    rescued_plan = business_logic_refine(dummy_plan, query)
-
-    if rescued_plan['target_layers']:
-        return rescued_plan, log
-
-    return {
-        "intent": "detect_defects",
-        "target_layers": [{"type": "defects", "id": 1, "name": "Rust"}],
-        "constraint_layers": []
-    }, log
+    dummy = {"intent": "visualize", "target_layers": [], "constraint_layers": []}
+    rescued = business_logic_refine(dummy, query)
+    if rescued['target_layers']: return rescued, log
+    return {"intent": "detect_defects", "target_layers": [{"type": "defects", "id": 1, "name": "Rust"}],
+            "constraint_layers": []}, log
 
 
 def generate_expert_response(query, stats, image, intent):
-    """Step 3: Expert"""
     models = get_best_model()
 
     if intent == 'visualize':
@@ -206,7 +177,7 @@ def generate_expert_response(query, stats, image, intent):
         CNN Findings: {stats}
         [TASK]
         User wants visualization. 
-        1. Confirm what is highlighted (e.g. "Rust on the Bearing").
+        1. Confirm highlighted areas and their size/percentage if available.
         2. Brief (Max 2 sentences).
         3. NO mention of "crops".
         """
@@ -217,7 +188,7 @@ def generate_expert_response(query, stats, image, intent):
         [TASK]
         Senior Bridge Inspector Report.
         1. Direct Answer.
-        2. Integrate visual & sensor data.
+        2. Integrate visual & sensor data (Quote the percentage coverage!).
         3. NO mention of "crops".
         """
 
@@ -245,7 +216,7 @@ def process_vision_smart(hrnet, image_pil, plan, debug=False):
     targets = plan.get('target_layers', [])
     constraints = plan.get('constraint_layers', [])
 
-    # 1. 约束层 (Constraint)
+    # 1. 约束层
     roi_mask = None
     if constraints:
         roi_mask = np.zeros((h, w), dtype=np.uint8)
@@ -255,14 +226,17 @@ def process_vision_smart(hrnet, image_pil, plan, debug=False):
             curr = mask_d if c.get('type') == 'defects' else mask_e
             roi_mask = cv2.bitwise_or(roi_mask, (curr == cid).astype(np.uint8))
 
-        # 调试：画出约束区域轮廓 (白色)
         if np.sum(roi_mask) > 0:
             contours, _ = cv2.findContours(roi_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             cv2.drawContours(res_img, contours, -1, (255, 255, 255), 1)
 
-    # 2. 目标层 (Target)
-    found = []
+    # 2. 目标层 + 🔥 面积计算 (Area Calc)
+    found_info = []  # 存详细信息： "Rust (5.2%)"
     legend = []
+
+    # 计算分母：如果有 ROI，分母就是 ROI 的面积；否则是整张图的面积
+    total_area = np.sum(roi_mask) if roi_mask is not None else (h * w)
+    if total_area == 0: total_area = 1  # 防止除以0
 
     for item in targets:
         tid = item.get('id')
@@ -283,31 +257,35 @@ def process_vision_smart(hrnet, image_pil, plan, debug=False):
 
         raw_pixels = np.sum(curr_mask)
 
-        # 🔥 核心：Target AND Constraint
         if roi_mask is not None:
             curr_mask = cv2.bitwise_and(curr_mask, roi_mask)
 
         pixel_count = np.sum(curr_mask)
         rgb = hrnet.colors_1[tid] if ttype == 'defects' else hrnet.colors[tid]
 
+        # 🔥 计算占比
+        ratio = (pixel_count / total_area) * 100
+
         if debug and raw_pixels > 0:
-            status = "✅ Kept" if pixel_count > 0 else "❌ Filtered (Not in Constraint)"
+            status = f"✅ {ratio:.2f}%" if pixel_count > 0 else "❌ BLOCKED"
             st.sidebar.text(f"{correct_name}: {raw_pixels}px -> {status}")
 
         if pixel_count > 0:
-            found.append(correct_name)
+            # 将百分比写入统计信息，喂给 Gemini
+            found_info.append(f"{correct_name}: {ratio:.2f}% coverage")
+
             canvas[curr_mask > 0] = rgb
             mask_bool = np.logical_or(mask_bool, curr_mask > 0)
             if correct_name not in [l[0] for l in legend]: legend.append((correct_name, rgb))
 
-    if found:
+    if legend:
         mask_u8 = mask_bool.astype(np.uint8) * 255
         blended = cv2.addWeighted(res_img, 0.6, canvas, 0.4, 0)
         res_img[mask_bool] = blended[mask_bool]
         contours, _ = cv2.findContours(mask_u8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         cv2.drawContours(res_img, contours, -1, (255, 255, 255), 2)
 
-    stats = f"Detected: {', '.join(found)}" if found else "No targets found."
+    stats = f"Detected: {', '.join(found_info)}" if found_info else "No targets detected."
     return res_img, stats, legend
 
 
@@ -347,7 +325,7 @@ with col2:
             if msg.get("log"):
                 with st.expander("🛠️ Correction Log"): st.text(msg["log"])
 
-    if up_file and (query := st.chat_input("Ex: Show me rust on the bearing")):
+    if up_file and (query := st.chat_input("Ex: What is the area of rust?")):
         st.session_state['history'].append({"role": "user", "content": query})
         with chat_box.chat_message("user"):
             st.markdown(query)
@@ -368,7 +346,7 @@ with col2:
                 st.session_state['history'].append({"role": "assistant", "content": reply, "log": log})
             else:
                 # Step 2: Vision
-                status.markdown("👁️ *Scanning...*")
+                status.markdown("👁️ *Scanning & Calculating...*")
                 res_img, stats, legend = process_vision_smart(hrnet, st.session_state['img'], plan, debug=debug_mode)
 
                 # Step 3: Expert
@@ -377,8 +355,8 @@ with col2:
 
                 status.markdown(reply)
 
+                # 显示控制
                 show_img = (plan['intent'] == 'visualize')
-
                 if show_img:
                     st.image(res_img)
                     if legend: st.markdown(render_legend(legend), unsafe_allow_html=True)
