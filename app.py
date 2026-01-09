@@ -224,23 +224,46 @@ def process_vision_colorful(hrnet, image_pil, plan):
     combined_mask_bool = np.zeros((h, w), dtype=bool)
 
     targets = plan.get('target_layers', [])
+    intent = plan.get('intent')
 
-    # 🌟 逻辑修复：如果是 visualize 但 Llama 没给具体的 target (比如只说了 visualize)，
-    # 为了避免空图，这里做一个“全显”兜底
-    if plan.get('intent') == 'visualize' and not targets:
-        pass  # 保持空，或者你可以决定显示所有 elements
+    # 🛠️ 修复 2：防止漏检 Rust
+    # 如果意图是“查病害(detect_defects)”，但列表里竟然没有 Rust，强制加进去！
+    if intent == 'detect_defects':
+        has_rust = any(t.get('name') == 'Rust' for t in targets)
+        if not has_rust:
+            print("🔧 Auto-injecting Rust detection for defect mode.")
+            targets.append({"type": "defects", "id": 1, "name": "Rust"})
+
+    # 🛠️ 修复 3：防止 visualize 模式下空列表导致不显示
+    # 如果是 visualize 但列表为空（比如用户只说 Show me），默认显示所有部件
+    if intent == 'visualize' and not targets:
+        all_elements = [(1, "Bearing"), (2, "Bracing"), (3, "Deck"), (4, "Floor Beam"), (5, "Girder"), (6, "Pier")]
+        for eid, name in all_elements:
+            targets.append({"type": "elements", "id": eid, "name": name})
 
     found_items = []
     legend_data = []
     stats_info = []
 
     for item in targets:
+        # 🛡️ 空值保护：如果 ID 没了，跳过
         if 'id' not in item or item['id'] is None: continue
 
-        if item['type'] == 'elements':
+        # 🛠️ 修复 1：解决 KeyError 'type'
+        # 如果 Llama 忘了写 type，我们根据名字自动猜！
+        item_type = item.get('type')
+        if not item_type:
+            # 简单的规则：如果是 Rust 就归为 defects，否则默认 elements
+            if item.get('name', '').lower() in ['rust', 'corrosion', 'defect']:
+                item_type = 'defects'
+            else:
+                item_type = 'elements'
+
+        # 根据类型取 Mask
+        if item_type == 'elements':
             current_mask = (mask_e_idx == item['id']).astype(np.uint8)
             rgb = hrnet.colors[item['id']] if item['id'] < len(hrnet.colors) else (255, 0, 0)
-        elif item['type'] == 'defects':
+        elif item_type == 'defects':
             current_mask = (mask_d_idx == item['id']).astype(np.uint8)
             rgb = hrnet.colors_1[item['id']] if item['id'] < len(hrnet.colors_1) else (0, 0, 255)
         else:
@@ -258,7 +281,7 @@ def process_vision_colorful(hrnet, image_pil, plan):
             ratio = (pixel_count / total) * 100
             stats_info.append(f"{item['name']} ({ratio:.1f}%)")
 
-    stats = f"CNN Found: {', '.join(stats_info)}" if found_items else "CNN: No target pixels found."
+    stats = f"CNN Found: {', '.join(stats_info)}" if found_items else "CNN: No specific target pixels found."
 
     if found_items:
         mask_uint8 = combined_mask_bool.astype(np.uint8) * 255
