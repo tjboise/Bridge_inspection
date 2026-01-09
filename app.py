@@ -37,7 +37,7 @@ with st.sidebar:
 
     st.divider()
     debug_mode = st.checkbox("🔬 Diagnostic Mode", value=True)
-    st.caption("v9.1 - User Experience Optimized")
+    st.caption("v9.2 - Constraint Nuke Fix")
 
 # ==========================================
 # 2. Backend Logic
@@ -78,7 +78,7 @@ def clean_json_string(text):
 def business_logic_refine(plan, query):
     q = query.lower()
 
-    # 规则 1：Overview 必须查 Rust (用于给 Expert 提供数据，但 Intent 保持 detect_defects)
+    # 规则 1：Overview 必须查 Rust
     if any(k in q for k in ["overview", "defect", "summary", "check", "condition"]):
         if plan['intent'] != 'detect_defects':
             plan['intent'] = 'detect_defects'
@@ -90,18 +90,25 @@ def business_logic_refine(plan, query):
         plan['target_layers'] = targets
 
     # 规则 2：All elements / Show me -> Visualize
-    # 只要用户用了 "Show", "Segment", "Visual" 这种词，或者 "All elements"，就是 visualize
     if any(k in q for k in ["show", "see", "visual", "segment", "highlight", "draw"]):
         plan['intent'] = 'visualize'
 
-    # 规则 3：All elements 必须清空约束并列出所有
+    # 规则 3：全量显示
     has_all = "all" in q or "every" in q or "whole" in q
     has_part = "element" in q or "part" in q or "component" in q
-
     if has_all and has_part:
         plan['intent'] = 'visualize'
         plan['target_layers'] = [{"type": "elements", "id": i, "name": name} for i, name in ELEMENT_MAP.items()]
         plan['constraint_layers'] = []
+
+        # 🔥 规则 4 (新)：核弹级约束清洗
+    # 如果用户没说 "on", "in", "within" 这种介词，严禁使用 Constraint！
+    # 这能防止 "Segment Girder" 被 AI 脑补成 "Girder on Bearing" 导致交集为 0
+    spatial_prepositions = [" on ", " in ", " within ", " inside ", " atop "]
+    has_spatial = any(prep in f" {q} " for prep in spatial_prepositions)
+
+    if not has_spatial:
+        plan['constraint_layers'] = []  # 强制清空，避免 AI 瞎加戏
 
     return plan
 
@@ -114,7 +121,7 @@ def ask_gemini_plan_with_retry(query):
     Task: Convert user query to JSON.
 
     Logic:
-    1. "visualize": User wants to SEE/LOCATE/HIGHLIGHT. (Keywords: Show, Segment, Where is)
+    1. "visualize": User wants to SEE/LOCATE. (Keywords: Show, Segment, Where is)
     2. "detect_defects": User wants REPORT/TEXT ONLY. (Keywords: Overview, Summary, Report)
 
     Output JSON Schema:
@@ -139,7 +146,6 @@ def ask_gemini_plan_with_retry(query):
                 return final_plan, log_buffer
             except Exception as parse_error:
                 log_buffer += f"⚠️ {model_name} format error. Retrying...\n"
-                # Self-correction logic omitted for brevity, swapping to next model usually faster
                 continue
         except Exception as e:
             continue
@@ -188,8 +194,6 @@ def generate_expert_response(query, stats, image, intent):
         2. Be extremely BRIEF (Max 2 sentences). 
         3. DO NOT describe the bridge structure or history. 
         4. DO NOT reference "crops" or "patches".
-
-        Example Output: "I have highlighted all detected bridge elements, including the Girder, Pier, and Deck."
         """
     else:
         # 🌟 模式 B：报告模式 (详细)
@@ -220,10 +224,6 @@ def process_vision_smart(hrnet, image_pil, plan, debug=False):
     img_cv = cv2.cvtColor(np.array(image_pil), cv2.COLOR_RGB2BGR)
     h, w = img_cv.shape[:2]
     mask_e, mask_d = hrnet.get_raw_masks(image_pil)
-
-    if debug:
-        unique_e = np.unique(mask_e)
-        st.sidebar.warning(f"🔎 Raw IDs: {unique_e}")
 
     res_img = cv2.cvtColor(img_cv, cv2.COLOR_BGR2RGB)
     canvas = np.zeros_like(res_img)
@@ -267,11 +267,19 @@ def process_vision_smart(hrnet, image_pil, plan, debug=False):
         curr = mask_d if ttype == 'defects' else mask_e
         curr_mask = (curr == tid).astype(np.uint8)
 
+        # ⚠️ 调试关键：看看是不是约束层把像素杀光了
+        raw_pixels = np.sum(curr_mask)
+
         if roi_mask is not None:
             curr_mask = cv2.bitwise_and(curr_mask, roi_mask)
 
         pixel_count = np.sum(curr_mask)
         rgb = hrnet.colors_1[tid] if ttype == 'defects' else hrnet.colors[tid]
+
+        # ⚠️ 诊断日志输出
+        if debug and raw_pixels > 0:
+            status = "✅ Kept" if pixel_count > 0 else "❌ BLOCKED by Constraint"
+            st.sidebar.text(f"{correct_name}: {raw_pixels}px -> {status}")
 
         if pixel_count > 0:
             found.append(correct_name)
@@ -356,9 +364,7 @@ with col2:
 
                 status.markdown(reply)
 
-                # 🌟 核心修改 1：严格控制图片显示
-                # 只有当 intent 是 visualize 时才显示图片。
-                # 即使 detect_defects 在后台调用了 CNN 查锈，前台也不显示。
+                # 🌟 显示控制
                 show_img = (plan['intent'] == 'visualize')
 
                 if show_img:
