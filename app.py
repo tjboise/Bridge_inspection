@@ -28,18 +28,16 @@ except:
 
 genai.configure(api_key=GOOGLE_API_KEY)
 
-# 🎨 Sidebar (UI 命名优化版)
+# 🎨 Sidebar
 with st.sidebar:
     st.header("⚙️ Architecture")
-
-    # 🌟 按照你的建议修改命名
-    st.success("🗺️ Planner: Gemini 2.5")  # 负责 JSON 规划
-    st.success("🧠 Reasoning: Gemini 2.5")  # 负责 报告分析
+    st.success("🗺️ Planner: Gemini 2.5")
+    st.success("🧠 Reasoning: Gemini 2.5")
     st.info("👁️ Vision: AECIF-Net")
 
     st.divider()
     debug_mode = st.checkbox("🔬 Diagnostic Mode", value=True)
-    st.caption("Beta Version")
+    st.caption("Beta Version v10.1")
 
 # ==========================================
 # 2. Backend Logic
@@ -79,12 +77,12 @@ def clean_json_string(text):
 
 def business_logic_refine(plan, query):
     """
-    🏢 业务逻辑兜底 (Business Rules)
+    🏢 业务逻辑兜底
     """
     q = query.lower()
 
-    # 规则 1: Overview 必须查 Rust
-    if any(k in q for k in ["overview", "defect", "summary", "check", "condition"]):
+    # 规则 1: Overview 必须查 Rust (为了让 Reasoning 知道有锈，但具体的 Prompt 会控制不说数字)
+    if any(k in q for k in ["overview", "defect", "summary", "check", "condition", "describe"]):
         if plan['intent'] != 'detect_defects': plan['intent'] = 'detect_defects'
         targets = plan.get('target_layers', [])
         if not targets: targets = []
@@ -116,11 +114,10 @@ def business_logic_refine(plan, query):
         plan['target_layers'] = [{"type": "elements", "id": i, "name": name} for i, name in ELEMENT_MAP.items()]
         plan['constraint_layers'] = []
 
-        # 规则 5: 约束清洗 (防止过度联想)
+        # 规则 5: 约束清洗
     spatial_prepositions = [" on ", " in ", " within ", " inside ", " atop "]
     has_spatial = any(prep in f" {q} " for prep in spatial_prepositions)
 
-    # 特殊逻辑: Rust on Bearing (只有在有介词时才启用约束)
     if has_spatial and detected_elements:
         has_defects = any(d['type'] == 'defects' for d in detected_elements)
         has_elems = any(d['type'] == 'elements' for d in detected_elements)
@@ -136,8 +133,7 @@ def business_logic_refine(plan, query):
     return plan
 
 
-def ask_gemini_planner(query):  # 重命名函数，名副其实
-    """Step 1: Planner (负责生成 JSON)"""
+def ask_gemini_planner(query):
     models = get_best_model()
     base_prompt = """
     Role: Bridge Inspection Planner. Task: Convert user query to JSON.
@@ -173,29 +169,53 @@ def keyword_rescue(query, previous_logs):
             "constraint_layers": []}, log
 
 
-def generate_reasoning_response(query, stats, image, intent):  # 重命名函数
-    """Step 3: Reasoning (负责深度分析)"""
+def generate_reasoning_response(query, stats, image, intent):
+    """
+    Step 3: Reasoning (核心修改部分)
+    """
     models = get_best_model()
+    q_lower = query.lower()
+
+    # 判断是否为 General Overview 类问题
+    is_general_overview = any(
+        k in q_lower for k in ["overview", "describe", "what is this", "explain the image", "general"])
 
     if intent == 'visualize':
         prompt = f"""
         User Query: "{query}"
-        CNN Findings: {stats}
+        [Visual Analysis Data]: {stats}
+
         [TASK]
         User wants visualization. 
-        1. Confirm highlighted areas and their size/percentage if available.
+        1. Confirm highlighted areas.
         2. Brief (Max 2 sentences).
         3. NO mention of "crops".
         """
-    else:
+    elif is_general_overview:
+        # 🔥 针对 Overview 的特殊 Prompt：禁止读数
         prompt = f"""
         User Query: "{query}"
-        [Sensor Data]: {stats}
+        [AI Detection Data]: {stats} (Use this for internal confirmation ONLY)
+
+        [TASK]
+        Act as a Senior Bridge Inspector providing a general site overview.
+        1. Describe the structure type and context (e.g., bridge over railway).
+        2. Mention visible conditions **qualitatively** (e.g., "signs of corrosion", "paint delamination").
+        3. ⛔️ RESTRICTION: Do NOT quote specific percentage numbers or mention "AI data/Sensor data" in the output. Keep it natural and professional.
+        4. NO mention of "crops".
+        """
+    else:
+        # 🔥 针对具体评估 (Assessment) 的 Prompt：允许读数
+        prompt = f"""
+        User Query: "{query}"
+        [AI Detection Data]: {stats}
+
         [TASK]
         Senior Bridge Inspector Reasoning.
-        1. Direct Answer.
-        2. Integrate visual & sensor data (Quote the percentage coverage!).
-        3. NO mention of "crops".
+        1. Direct Answer to the specific question.
+        2. You MAY quote the percentage coverage from the [AI Detection Data] to support your assessment of severity.
+        3. Use professional engineering terminology.
+        4. NO mention of "crops".
         """
 
     for model_name in models:
@@ -275,6 +295,7 @@ def process_vision_smart(hrnet, image_pil, plan, debug=False):
             st.sidebar.text(f"{correct_name}: {raw_pixels}px -> {status}")
 
         if pixel_count > 0:
+            # 这里的文本只给 LLM 看，用户看不到，所以保留数字供 LLM 参考
             found_info.append(f"{correct_name}: {ratio:.2f}% coverage")
             canvas[curr_mask > 0] = rgb
             mask_bool = np.logical_or(mask_bool, curr_mask > 0)
