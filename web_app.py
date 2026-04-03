@@ -330,7 +330,26 @@ def generate_reasoning_response(query, stats, image, plan, pdf_file_handle):
     try:
         model = genai.GenerativeModel('models/gemini-2.0-flash')
         # 如果你已经有 gemini-2.0-flash 权限，也可以尝试替换
-        content_payload = [pdf_file_handle, image, prompt]
+        # 修改后的代码：动态构建 Payload，防止 None 导致崩溃
+        content_payload = []
+        if pdf_file_handle is not None:
+            content_payload.append(pdf_file_handle)
+
+        content_payload.append(image)
+        content_payload.append(prompt)
+        try:
+            model = genai.GenerativeModel('models/gemini-2.0-flash')
+            res = model.generate_content(content_payload)
+            return res.text
+        except Exception as e:
+            try:
+                # 最后的保底：只传图片和文字
+                res = model.generate_content([image, prompt])
+                return res.text
+            except:
+                return f"Error: {str(e)}"
+        # content_payload = [pdf_file_handle, image, prompt]
+
         res = model.generate_content(content_payload)
         return res.text
     except Exception as e:
@@ -377,69 +396,66 @@ with col2:
 
     st.write("---")
     st.markdown("##### 💡 Popular Questions")
-    q_cols = st.columns(2)
+    q_cols = st.columns(3)
     questions = [
         "Can you simply describe the figure?",  # Summary mode
-        "Show me the deck and the girders",  # Union mode
         "Can you segment all elements?",  # Union mode
-        "Can you count the corrosion area on pier?"  # Intersection + Technical mode
+        "Show me the deck and the girders",  # Union mode
+        "Can you show the rust area for me?",
+        "Can you count the corrosion area on pier?",  # Intersection + Technical mode
+        "Evaluate the Condition State of the rust on girder."
     ]
 
     selected_query = None
     for i, q in enumerate(questions):
-        if q_cols[i % 2].button(q, use_container_width=True, key=f"q_{i}"):
+        if q_cols[i % 3].button(q, use_container_width=True, key=f"q_{i}"):
             selected_query = q
 
     user_query = st.chat_input("Ask about bridge logic...")
     final_query = selected_query if selected_query else user_query
 
+    # 增加一个判断：只有当 final_query 不是刚刚处理过的那个，才进入推理
     if up_file and final_query:
-        st.session_state['history'].append({"role": "user", "content": final_query})
-        with chat_box.chat_message("user"):
-            st.markdown(final_query)
+        # 获取上一次处理成功的 query
+        last_processed_query = st.session_state.get('last_query', None)
 
-        with chat_box.chat_message("assistant"):
-            st_status = st.empty()
+        if final_query != last_processed_query:
+            # 【第一步】：立即存入用户消息并展示（不等待 AI）
+            # 检查上一条是不是重复的用户消息，防止重复添加
+            if not st.session_state['history'] or st.session_state['history'][-1]["content"] != final_query:
+                st.session_state['history'].append({"role": "user", "content": final_query})
+                # 这一行很关键：强制让页面刷新一次，先把用户的话显示出来
+                st.rerun()
 
-            # 1. Planner 阶段
-            st_status.info("🧠 Thinking (Single/Union/Intersection)...")
-            plan, model_used = ask_gemini_planner(final_query)
+                # --- 这一部分放在 if 之外，或者紧随其后 ---
+        # 检查：如果最后一条是用户消息，说明 AI 还没回复，现在开始推理
+    if st.session_state['history'] and st.session_state['history'][-1]["role"] == "user":
+        current_query = st.session_state['history'][-1]["content"]
 
-            # 2. 视觉逻辑阶段
-            st_status.info("👁️ Executing Pixel Logic...")
-            res_img, stats, legend = process_logical_vision(hrnet, img_pil, plan)
+        # 只有还没处理过这个 query 时才执行
+        if st.session_state.get('last_query') != current_query:
+            with chat_box.chat_message("assistant"):
+                with st.status("🔍 BridgeGPT is processing...", expanded=True) as status:
+                    plan, _ = ask_gemini_planner(current_query)
+                    res_img, stats, legend = process_logical_vision(hrnet, img_pil, plan)
+                    reply = generate_reasoning_response(current_query, stats, img_pil, plan, aashto_pdf)
+                    status.update(label="✅ Analysis complete", state="complete", expanded=False)
 
-            # 3. 推理生成阶段
-            st_status.info("📝 Generating Report...")
-            reply = generate_reasoning_response(final_query, stats, img_pil, plan,aashto_pdf)
+                # 构造图例 HTML
+                lg_html = None
+                if plan['intent'] != 'chat' and legend:
+                    lg_html = "".join([
+                        f"<span style='background:rgb{tuple(c)};padding:2px 8px;margin-right:5px;border-radius:3px;font-size:0.8rem;color:white;'>{n}</span>"
+                        for n, c in legend])
 
-            st_status.empty()  # 移除状态提示
+                # 【第二步】：存入助手消息
+                st.session_state['history'].append({
+                    "role": "assistant",
+                    "content": reply,
+                    "img": res_img if plan['intent'] != 'chat' else None,
+                    "legend_html": lg_html
+                })
 
-            # ✨ 核心修改：使用 columns 实现左文右图
-            if plan['intent'] != 'chat' and res_img is not None:
-                # 创建两列，比例可以根据喜好调整，这里建议 1.5 : 1
-                text_col, img_col = st.columns([1.5, 1])
-
-                with text_col:
-                    st.markdown(reply)
-                    # 如果有图例，显示在文字下方
-                    if legend:
-                        lg_html = "".join([
-                            f"<span style='background:rgb{tuple(c)};padding:2px 8px;margin-right:5px;border-radius:3px;font-size:0.8rem;color:white;'>{n}</span>"
-                            for n, c in legend])
-                        st.markdown(lg_html, unsafe_allow_html=True)
-
-                with img_col:
-                    # 图像在这里会自动缩小以适应列宽
-                    st.image(res_img, width="stretch")
-            else:
-                # 如果只是普通聊天（没有图像生成），则直接显示文字
-                st.markdown(reply)
-
-            # 存入历史记录时，我们也需要标记它是并排显示的
-            st.session_state['history'].append({
-                "role": "assistant",
-                "content": reply,
-                "img": res_img if plan['intent'] != 'chat' else None,
-                "legend_html": lg_html if (plan['intent'] != 'chat' and legend) else None
-            })
+                # 记录已处理，再次刷新以同步 UI
+                st.session_state['last_query'] = current_query
+                st.rerun()
