@@ -2,6 +2,7 @@ streamlit
 opencv-python-headless
 numpy
 Pillow
-torch
 google-generativeai
-openai
+torch
+torchvision
+openpyxl
