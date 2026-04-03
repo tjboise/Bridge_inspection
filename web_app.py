@@ -402,7 +402,7 @@ with col2:
         "Can you segment all elements?",  # Union mode
         "Show me the deck and the girders",  # Union mode
         "Can you show the rust area for me?",
-        "Can you count the corrosion area on pier?",  # Intersection + Technical mode
+        "Calculate the corrosion area on pier.",  # Intersection + Technical mode
         "Evaluate the Condition State of the rust on girder."
     ]
 
