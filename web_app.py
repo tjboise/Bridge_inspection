@@ -51,8 +51,6 @@ st.markdown("""
 
 
 # API 配置
-# GOOGLE_API_KEY = "AIzaSyDMLr1ohvRxzcahRm6-vClKH7fcc1cGqzo"
-# GOOGLE_API_KEY = "AIzaSyDS3gnSHP7xsHw0vaJkT2WfMrxbJHFIZw4"
 
 
 # 修改后：
@@ -121,7 +119,7 @@ def ask_gemini_planner(query):
     {{ "intent": "chat", "reply": "A bridge pier is a type of structure that transmits the vertical load of the bridge super-structure to the foundation, providing intermediate support between the abutments." }}
     
     User: "Can you simply describe the figure?"
-    { "intent": "chat", "reply": "This image shows a bridge structure. Would you like me to analyze any specific components like the girder or pier for potential defects?" }
+    {{ "intent": "chat", "reply": "This image depicts a [bridge type] with visible [primary elements, e.g., steel girders and concrete piers]. There are signs of [surface condition, e.g., minor weathering or structural integrity]. Would you like a detailed segmentation of these parts?" }}
 
     User: "Show me the rust and the girders."
     {{ "intent": "union", "targets": [ {{ "type": "defect", "name": "rust" }}, {{ "type": "element", "name": "girder" }} ], "mode": "summary" }}
