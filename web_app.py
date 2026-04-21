@@ -88,7 +88,7 @@ def load_model():
 # 🎯 引入 Single, Union, Intersection 逻辑
 # ==========================================
 def ask_gemini_planner(query):
-    models = ['models/gemini-2.0-flash']
+    models = ['models/gemini-2.5-flash-lite']
 
     base_prompt = f"""
     # Role Assignment
@@ -328,7 +328,7 @@ def generate_reasoning_response(query, stats, image, plan, pdf_file_handle):
     # 调用模型
     # 注意：我们同时传入了 pdf_file_handle (手册), image (图片) 和 prompt (文字)
     try:
-        model = genai.GenerativeModel('models/gemini-2.0-flash')
+        model = genai.GenerativeModel('models/gemini-2.5-flash-lite')
         # 如果你已经有 gemini-2.0-flash 权限，也可以尝试替换
         # 修改后的代码：动态构建 Payload，防止 None 导致崩溃
         content_payload = []
@@ -338,7 +338,7 @@ def generate_reasoning_response(query, stats, image, plan, pdf_file_handle):
         content_payload.append(image)
         content_payload.append(prompt)
         try:
-            model = genai.GenerativeModel('models/gemini-2.0-flash')
+            model = genai.GenerativeModel('models/gemini-2.5-flash-lite')
             res = model.generate_content(content_payload)
             return res.text
         except Exception as e:
