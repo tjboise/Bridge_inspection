@@ -52,6 +52,7 @@ st.markdown("""
 
 # API 配置
 # GOOGLE_API_KEY = "AIzaSyDMLr1ohvRxzcahRm6-vClKH7fcc1cGqzo"
+# GOOGLE_API_KEY = "AIzaSyDS3gnSHP7xsHw0vaJkT2WfMrxbJHFIZw4"
 
 
 # 修改后：
@@ -113,14 +114,15 @@ def ask_gemini_planner(query):
     - For "What is this image?" or "Describe this bridge", use intent "single", target "deck" (as a pivot), mode "summary".
 
     # Examples
-    ## 1. General Chat
     User: "Hello, who are you?"
     {{ "intent": "chat", "reply": "Hello! I am BridgeGPT, an AI assistant developed at Rutgers University specializing in bridge structural health monitoring and inspection." }}
 
     User: "What is the purpose of a bridge pier?"
     {{ "intent": "chat", "reply": "A bridge pier is a type of structure that transmits the vertical load of the bridge super-structure to the foundation, providing intermediate support between the abutments." }}
+    
+    User: "Can you simply describe the figure?"
+    { "intent": "chat", "reply": "This image shows a bridge structure. Would you like me to analyze any specific components like the girder or pier for potential defects?" }
 
-    ## 2. Visual Task
     User: "Show me the rust and the girders."
     {{ "intent": "union", "targets": [ {{ "type": "defect", "name": "rust" }}, {{ "type": "element", "name": "girder" }} ], "mode": "summary" }}
 
