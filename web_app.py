@@ -113,14 +113,14 @@ def ask_gemini_planner(query):
     - For "What is this image?" or "Describe this bridge", use intent "single", target "deck" (as a pivot), mode "summary".
 
     # Examples
-    ## 1. General Chat (No image processing)
+    ## 1. General Chat
     User: "Hello, who are you?"
     {{ "intent": "chat", "reply": "Hello! I am BridgeGPT, an AI assistant developed at Rutgers University specializing in bridge structural health monitoring and inspection." }}
 
     User: "What is the purpose of a bridge pier?"
     {{ "intent": "chat", "reply": "A bridge pier is a type of structure that transmits the vertical load of the bridge super-structure to the foundation, providing intermediate support between the abutments." }}
 
-    ## 2. Visual Task (Segmentation required)
+    ## 2. Visual Task
     User: "Show me the rust and the girders."
     {{ "intent": "union", "targets": [ {{ "type": "defect", "name": "rust" }}, {{ "type": "element", "name": "girder" }} ], "mode": "summary" }}
 
@@ -129,6 +129,9 @@ def ask_gemini_planner(query):
 
     User: "Highlight the deck."
     {{ "intent": "single", "target": {{ "type": "element", "name": "deck" }}, "mode": "summary" }}
+    
+    User: "Can you segment all elements?"
+    {{ "intent": "union", "targets": [ {{ "type": "element", "name": "bearing" }}, {{ "type": "element", "name": "bracing" }}, {{ "type": "element", "name": "deck" }}, {{ "type": "element", "name": "floor_beam" }}, {{ "type": "element", "name": "girder" }}, {{ "type": "element", "name": "pier" }} ], "mode": "summary" }}
 
     # Operation:
     Always respond in correct JSON without explanations or markdown formatting. 
