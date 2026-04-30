@@ -18,43 +18,9 @@ cd AECIF-Net
 ### Pre-trained Weight
 * Please download pre-trained weights on Cityscapes from [here](https://cmu.app.box.com/s/if90kw6r66q2y6c5xparflhnbwi6c2yi) and place it in `./model_data/`.
 
-### Model Download
-|   Model   | mIoU_Element | mIoU_Defect | Weight |
-|:---------:|:------------:|:-----------:|:------:|
-| AECIF-Net |     92.11    |    87.16    |    [Link](https://drive.google.com/file/d/1OeWRTi49QwzQzw2OZm52HqPZRayIKdM5/view?usp=sharing)   |
 
-### Training
-~~~~
-python train.py
-~~~~
 
-### Testing
-Evaluating the model on the test set:
-~~~~
-python get_miou.py
-~~~~
 
-### Inference
-Place the inference images in `./img/`, and then run:
-~~~~
-python predict.py
-~~~~
-
-## Citation
-If AECIF-Net and the SBCIV dataset are helpful to you, please cite them as:
-~~~~
-@article{ZHANG2024105292,
-      title = {Attention-Enhanced Co-Interactive Fusion Network (AECIF-Net) for automated structural condition assessment in visual inspection},
-      journal = {Automation in Construction},
-      volume = {159},
-      pages = {105292},
-      year = {2024},
-      issn = {0926-5805},
-      doi = {https://doi.org/10.1016/j.autcon.2024.105292},
-      url = {https://www.sciencedirect.com/science/article/pii/S0926580524000281},
-      author = {Chenyu Zhang and Zhaozheng Yin and Ruwen Qin}
-}
-~~~~
 ## Note
 Part of the codes are referred from <a href="https://github.com/itschenyu/Multitask-Learning-Bridge-Inspection">MTL-Bridge-Inspection</a> project.
 
