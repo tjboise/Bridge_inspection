@@ -6,10 +6,13 @@ import json
 import os
 import google.generativeai as genai
 from AECIF_Net import HRnet_Segmentation
+import torch
+import torchvision.transforms as T
 
 # ==========================================
 # 1. 系统配置 & 风格
 # ==========================================
+BRIDGEGPT_LOGO = "img/logo_1.png"
 RUTGERS_LOGO = "https://upload.wikimedia.org/wikipedia/commons/thumb/b/b6/Rutgers_Scarlet_Knights_logo.svg/1200px-Rutgers_Scarlet_Knights_logo.svg.png"
 
 st.set_page_config(
@@ -50,10 +53,6 @@ st.markdown("""
     """, unsafe_allow_html=True)
 
 
-# API 配置
-
-
-# 修改后：
 import streamlit as st
 
 # 从 Streamlit 的安全设置中读取
@@ -62,13 +61,22 @@ if "GOOGLE_API_KEY" in st.secrets:
 else:
     st.error("请在 Secrets 中配置 GOOGLE_API_KEY")
 
-
-
-# genai.configure(api_key=GOOGLE_API_KEY)
-
 # 类别映射
 ELEMENT_MAP = {1: "bearing", 2: "bracing", 3: "deck", 4: "floor_beam", 5: "girder", 6: "pier"}
 DEFECT_MAP = {1: "rust"}
+CS_MAP = {
+    0: "CS1_Good",
+    1: "CS2_Fair",
+    2: "CS3_Poor",
+    3: "CS4_Severe"
+}
+
+CS_COLORS = {
+    0: (34, 139, 34),  # 绿  Good
+    1: (255, 191, 0),  # 黄  Fair
+    2: (255, 100, 0),  # 橙  Poor
+    3: (180, 0, 0),  # 红  Severe
+}
 
 
 # ==========================================
@@ -77,9 +85,24 @@ DEFECT_MAP = {1: "rust"}
 @st.cache_resource
 def load_model():
     weight_path = 'model_data/best_epoch_weights.pth'
-    if not os.path.exists(weight_path): return None, "Weight file missing"
-    model = HRnet_Segmentation(model_path=weight_path, cuda=False)
-    return model, "CPU"
+    if not os.path.exists(weight_path):
+        return None, None, "Weight file missing"
+    hrnet = HRnet_Segmentation(model_path=weight_path, cuda=False)
+
+    cs_weight_path = 'model_data/weights_35.pt'
+    cs_model = None
+    if os.path.exists(cs_weight_path):
+        try:
+            cs_model = torch.load(
+                cs_weight_path,
+                map_location='cpu',
+                weights_only=False
+            )
+            cs_model.eval()
+        except Exception as e:
+            st.warning(f"CS model failed to load: {e}")
+
+    return hrnet, cs_model, "CPU"
 
 
 # ==========================================
@@ -111,13 +134,13 @@ def ask_gemini_planner(query):
     - Set "mode": "technical" ONLY if the user asks for areas, percentages, or explicit numbers.
     - For "What is this image?" or "Describe this bridge", use intent "single", target "deck" (as a pivot), mode "summary".
 
-    # Examples
+        # Examples
     User: "Hello, who are you?"
     {{ "intent": "chat", "reply": "Hello! I am BridgeGPT, an AI assistant developed at Rutgers University specializing in bridge structural health monitoring and inspection." }}
 
     User: "What is the purpose of a bridge pier?"
     {{ "intent": "chat", "reply": "A bridge pier is a type of structure that transmits the vertical load of the bridge super-structure to the foundation, providing intermediate support between the abutments." }}
-    
+
     User: "Can you simply describe the figure?"
     {{ "intent": "chat", "reply": "This image depicts a [bridge type] with visible [primary elements, e.g., steel girders and concrete piers]. There are signs of [surface condition, e.g., minor weathering or structural integrity]. Would you like a detailed segmentation of these parts?" }}
 
@@ -129,9 +152,22 @@ def ask_gemini_planner(query):
 
     User: "Highlight the deck."
     {{ "intent": "single", "target": {{ "type": "element", "name": "deck" }}, "mode": "summary" }}
-    
+
     User: "Can you segment all elements?"
     {{ "intent": "union", "targets": [ {{ "type": "element", "name": "bearing" }}, {{ "type": "element", "name": "bracing" }}, {{ "type": "element", "name": "deck" }}, {{ "type": "element", "name": "floor_beam" }}, {{ "type": "element", "name": "girder" }}, {{ "type": "element", "name": "pier" }} ], "mode": "summary" }}
+
+    User: "Show me the corrosion severity map."
+    {{"intent": "corrosion_state", "mode": "technical"}}
+
+    User: "What is the corrosion state of the girder?"
+    {{"intent": "corrosion_state_on_element",
+     "base": {{"type": "element", "name": "girder"}},
+     "mode": "technical"}}
+
+    # Operation:
+    Always respond in correct JSON without explanations or markdown formatting. 
+    Now, for this user query:
+    User Query: {query}
 
     # Operation:
     Always respond in correct JSON without explanations or markdown formatting. 
@@ -161,11 +197,33 @@ def ask_gemini_planner(query):
             "reply": "I'm having trouble understanding the logic, but I'm here to help with your bridge inspection!"}, "Fallback"
 
 
+def get_cs_mask(cs_model, image_pil):
+    orig_w, orig_h = image_pil.size
+
+    # resize到512x512
+    img_resized = image_pil.resize((512, 512))
+
+    # 转成0-255的float tensor，不做Normalize
+    img_array = np.array(img_resized).astype(np.float32)  # (512,512,3) 0-255
+    input_tensor = torch.from_numpy(img_array).permute(2, 0, 1).unsqueeze(0)  # (1,3,512,512)
+
+    with torch.no_grad():
+        output = cs_model(input_tensor)
+        pred = output.argmax(dim=1).squeeze()
+
+    # 还原到原图尺寸
+    pred_pil = Image.fromarray(pred.numpy().astype(np.uint8))
+    pred_resized = pred_pil.resize((orig_w, orig_h), Image.NEAREST)
+
+    return np.array(pred_resized)  # 0=Good, 1=Fair, 2=Poor, 3=Severe
+
+
 # ==========================================
 # 4. 逻辑视觉执行 (The Logical Vision Executor)
 # 🎯 核心逻辑：处理并集与交集运算
 # ==========================================
-def process_logical_vision(hrnet, image_pil, plan):
+
+def process_logical_vision(hrnet, cs_model, image_pil, plan):
     # 获取原始 CNN 输出
     mask_e_pil, mask_d_pil = hrnet.get_raw_masks(image_pil)
     raw_e, raw_d = np.array(mask_e_pil), np.array(mask_d_pil)
@@ -218,6 +276,44 @@ def process_logical_vision(hrnet, image_pil, plan):
                 if base_area > 0:
                     ratio = (np.sum(overlap) / base_area) * 100
                     found_info.append(f"Rust on {base_name}: {ratio:.2f}% of component area")
+        # --- 逻辑 4: 全图 Corrosion State ---
+        elif intent == "corrosion_state":
+            if cs_model is None:
+                st.error("CS model not loaded.")
+            else:
+                raw_cs = get_cs_mask(cs_model, image_pil)
+                total_px = raw_cs.size
+                for cs_id, cs_name in CS_MAP.items():
+                    if cs_id == 0:  # ← 跳过Good/背景
+                        continue
+                    px = np.sum(raw_cs == cs_id)
+                    if px > 0:
+                        ratio = px / total_px * 100
+                        final_mask[raw_cs == cs_id] = cs_id + 200
+                        legend.append((cs_name, CS_COLORS[cs_id]))
+                        found_info.append(f"CS{cs_id} ({cs_name.split('_')[1]}): {ratio:.2f}% of total image area")
+
+        # --- 逻辑 5: 特定构件上的 Corrosion State ---
+        elif intent == "corrosion_state_on_element":
+            if cs_model is None:
+                st.error("CS model not loaded.")
+            else:
+                base_name = plan['base']['name'].lower()
+                eid = next((k for k, v in ELEMENT_MAP.items() if v == base_name), 0)
+                element_mask = (raw_e == eid)
+                element_px = np.sum(element_mask)
+                raw_cs = get_cs_mask(cs_model, image_pil)
+
+                for cs_id, cs_name in CS_MAP.items():
+                    if cs_id == 0:  # ← 跳过Good/背景
+                        continue
+                    cs_region = (raw_cs == cs_id) & element_mask
+                    px = np.sum(cs_region)
+                    if px > 0 and element_px > 0:
+                        ratio = px / element_px * 100
+                        final_mask[cs_region] = cs_id + 200
+                        legend.append((cs_name, CS_COLORS[cs_id]))
+                        found_info.append(f"CS{cs_id} ({cs_name.split('_')[1]}): {ratio:.2f}% of {base_name} area")
 
     except Exception as e:
         st.error(f"Logic Processing Error: {e}")
@@ -226,11 +322,13 @@ def process_logical_vision(hrnet, image_pil, plan):
     unique_ids = np.unique(final_mask)
     for uid in unique_ids:
         if uid == 0: continue
+        if uid >= 200:  # CS类别，跳过，legend已在分支里单独处理
+            continue
         px = np.sum(final_mask == uid)
         name = "Rust" if uid == 101 else ELEMENT_MAP.get(uid, "Unknown")
         color = (128, 0, 0) if uid == 101 else hrnet.colors[uid]
         legend.append((name, color))
-        if intent != "intersection":  # Intersection 已在上面单独处理
+        if intent != "intersection":
             ratio = (px / (h * w)) * 100
             found_info.append(f"{name}: {ratio:.2f}% total area")
 
@@ -238,8 +336,13 @@ def process_logical_vision(hrnet, image_pil, plan):
     res_img = cv2.cvtColor(np.array(image_pil), cv2.COLOR_RGB2BGR)
     overlay = np.zeros_like(res_img)
     for name, clr in legend:
-        uid = 101 if name == "Rust" else next(k for k, v in ELEMENT_MAP.items() if v == name.lower())
-        overlay[final_mask == uid] = clr[::-1]  # RGB to BGR
+        if name == "Rust":
+            uid = 101
+        elif name in CS_MAP.values():
+            uid = next(cs_id + 200 for cs_id, cs_name in CS_MAP.items() if cs_name == name)
+        else:
+            uid = next(k for k, v in ELEMENT_MAP.items() if v == name.lower())
+        overlay[final_mask == uid] = clr[::-1]
 
     if legend:
         res_img = cv2.addWeighted(res_img, 0.7, overlay, 0.3, 0)
@@ -250,26 +353,26 @@ def process_logical_vision(hrnet, image_pil, plan):
 
     return cv2.cvtColor(res_img, cv2.COLOR_BGR2RGB), ", ".join(found_info), legend
 
+
 # ==========================================
 # 5.5 RAG 知识库加载 (AASHTO PDF)
 # ==========================================
 @st.cache_resource
 def load_aashto_manual():
-    # 建议使用相对路径的基准，防止云端路径偏移
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    pdf_path = os.path.join(base_dir, "standard/AASHTO-bridge_element_guide_manual__05092010.pdf")
+    # 🔍 修正点：确保路径包含 .pdf 后缀，并且检查路径是否正确
+    pdf_path = "standard/AASHTO-bridge_element_guide_manual__05092010.pdf"
 
     if not os.path.exists(pdf_path):
-        st.error(f"找不到手册文件: {pdf_path}")
+        # 调试建议：如果找不到文件，打印一下当前路径在哪里，方便纠错
+        print(f"Current Path: {os.getcwd()}")
         return None
 
     try:
-        # 💡 注意：genai.upload_file 在云端可能因为并发产生冲突
-        # 建议在 st.cache_resource 下运行，确保每个 session 只上传一次
+        # 上传到 Google
         pdf_file = genai.upload_file(path=pdf_path, display_name="AASHTO Manual")
         return pdf_file
     except Exception as e:
-        st.error(f"Google API 上传失败: {e}")
+        # 这里的报错可以打印出来，看看是不是 API Key 的权限问题
         return None
 
 
@@ -286,8 +389,24 @@ def generate_reasoning_response(query, stats, image, plan, pdf_file_handle):
 
     # 逻辑判断：用户是否在问等级、状态或严重程度
     is_condition_query = any(k in query.lower() for k in ["condition", "state", "cs", "rank", "severity", "level"])
+    # ── 新增：判断是否为CS分析意图 ──
+    is_cs_intent = intent in ["corrosion_state", "corrosion_state_on_element"]
 
-    if is_condition_query and pdf_file_handle:
+    if is_cs_intent:
+        # ── CS专用模式：强制带面积证据 ──
+        instruction = (
+            "You are a Senior Bridge Inspector at Rutgers University. "
+            "The AI vision system has detected corrosion condition states on the bridge. "
+            "\n\n[TASK]"
+            "1. Report the detected area percentages for each condition state as Evidence. "
+            "   Format: 'CS2 (Fair): X.XX% | CS3 (Poor): X.XX% | CS4 (Severe): X.XX%' "
+            "2. Based on the dominant condition state, give an overall assessment. "
+            "3. If AASHTO manual is available, cross-reference and cite the criteria. "
+            "4. End with a maintenance recommendation. "
+            "5. Keep response under 5 sentences, professional and evidence-based."
+        )
+
+    elif is_condition_query and pdf_file_handle:
         # --- RAG 模式：资深工程师持证上岗 ---
         instruction = (
             "You are a Senior Bridge Inspector at Rutgers University. "
@@ -324,6 +443,11 @@ def generate_reasoning_response(query, stats, image, plan, pdf_file_handle):
     - User Query: {query}
     - Vision Stats (AI Detection): {stats}
 
+    [EVIDENCE FORMAT REQUIREMENT]
+    Always include the detected percentages from Vision Stats in your response.
+    Example format: "AI detection shows CS2 (Fair): 12.3%, CS3 (Poor): 8.5%, CS4 (Severe): 3.2% of girder area."
+
+
     [OUTPUT]
     Respond in a neutral, expert tone. No prefaces like 'Sure' or 'Based on'.
     """
@@ -358,17 +482,24 @@ def generate_reasoning_response(query, stats, image, plan, pdf_file_handle):
     except Exception as e:
         return f"Logic Error: Could not access AASHTO manual. {str(e)}"
 
+
+# # ==========================================
+# # 6. UI 前端
+# # ==========================================
+# st.markdown(
+#     f"""<div style="display:flex;align-items:center;"><img src="{RUTGERS_LOGO}" width="40"><h1 style="margin-left:15px;">BridgeGPT</h1></div>""",
+#     unsafe_allow_html=True)
+
 # ==========================================
 # 6. UI 前端
 # ==========================================
-st.markdown(
-    f"""<div style="display:flex;align-items:center;"><img src="{RUTGERS_LOGO}" width="40"><h1 style="margin-left:15px;">BridgeGPT</h1></div>""",
-    unsafe_allow_html=True)
+# 既然图片自带文字，直接居中显示该图片即可
+st.image(BRIDGEGPT_LOGO, width=300)  # width 可以根据页面布局调整到你想要的大小
 
 # hrnet, _ = load_model()
 # 初始化模型和 PDF 知识库
-hrnet, _ = load_model()
-aashto_pdf = load_aashto_manual() # 获取 PDF 句柄
+hrnet, cs_model, _ = load_model()
+aashto_pdf = load_aashto_manual()  # 获取 PDF 句柄
 
 col1, col2 = st.columns([1, 1.8])
 
@@ -405,8 +536,8 @@ with col2:
         "Can you segment all elements?",  # Union mode
         "Show me the deck and the girders",  # Union mode
         "Can you show the rust area for me?",
-        "Calculate the corrosion area on pier.",  # Intersection + Technical mode
-        "Evaluate the Condition State of the rust on girder."
+        "Can you count the corrosion area on pier?",  # Intersection + Technical mode
+        "What is the corrosion state of the girder."
     ]
 
     selected_query = None
@@ -440,7 +571,7 @@ with col2:
             with chat_box.chat_message("assistant"):
                 with st.status("🔍 BridgeGPT is processing...", expanded=True) as status:
                     plan, _ = ask_gemini_planner(current_query)
-                    res_img, stats, legend = process_logical_vision(hrnet, img_pil, plan)
+                    res_img, stats, legend = process_logical_vision(hrnet, cs_model, img_pil, plan)
                     reply = generate_reasoning_response(current_query, stats, img_pil, plan, aashto_pdf)
                     status.update(label="✅ Analysis complete", state="complete", expanded=False)
 
