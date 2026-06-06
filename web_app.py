@@ -83,6 +83,27 @@ CS_COLORS = {
 # 2. 模型加载 (The Loader)
 # ==========================================
 @st.cache_resource
+# def load_model():
+#     weight_path = 'model_data/best_epoch_weights.pth'
+#     if not os.path.exists(weight_path):
+#         return None, None, "Weight file missing"
+#     hrnet = HRnet_Segmentation(model_path=weight_path, cuda=False)
+#
+#     cs_weight_path = 'model_data/weights_35.pt'
+#     cs_model = None
+#     if os.path.exists(cs_weight_path):
+#         try:
+#             cs_model = torch.load(
+#                 cs_weight_path,
+#                 map_location='cpu',
+#                 weights_only=False
+#             )
+#             cs_model.eval()
+#         except Exception as e:
+#             st.warning(f"CS model failed to load: {e}")
+#
+#     return hrnet, cs_model, "CPU"
+@st.cache_resource
 def load_model():
     weight_path = 'model_data/best_epoch_weights.pth'
     if not os.path.exists(weight_path):
@@ -90,6 +111,23 @@ def load_model():
     hrnet = HRnet_Segmentation(model_path=weight_path, cuda=False)
 
     cs_weight_path = 'model_data/weights_35.pt'
+
+    # 检查是否是LFS pointer文件（真实权重文件应该>100MB）
+    if os.path.exists(cs_weight_path) and os.path.getsize(cs_weight_path) < 1024 * 1024:
+        os.remove(cs_weight_path)
+
+    if not os.path.exists(cs_weight_path):
+        try:
+            import gdown
+            st.info("⏳ Downloading CS model weights, please wait...")
+            gdown.download(
+                "https://drive.google.com/uc?id=17zPZ_QgYH07OLYO5Wi526oK4P773L6JR",
+                cs_weight_path,
+                quiet=False
+            )
+        except Exception as e:
+            st.warning(f"Failed to download CS model: {e}")
+
     cs_model = None
     if os.path.exists(cs_weight_path):
         try:
@@ -103,7 +141,6 @@ def load_model():
             st.warning(f"CS model failed to load: {e}")
 
     return hrnet, cs_model, "CPU"
-
 
 # ==========================================
 # 3. 增强型规划者 (The Logical Planner)

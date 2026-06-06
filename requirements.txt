@@ -6,3 +6,4 @@ google-generativeai
 torch
 torchvision
 openpyxl
+gdown
