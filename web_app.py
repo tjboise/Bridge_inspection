@@ -409,20 +409,19 @@ def process_logical_vision(hrnet, cs_model, image_pil, plan):
 # ==========================================
 @st.cache_resource
 def load_aashto_manual():
-    # 🔍 修正点：确保路径包含 .pdf 后缀，并且检查路径是否正确
     pdf_path = "standard/AASHTO-bridge_element_guide_manual__05092010.pdf"
+    # print("DEBUG cwd:", os.getcwd())
+    # print("DEBUG pdf exists?", os.path.exists(pdf_path))
 
     if not os.path.exists(pdf_path):
-        # 调试建议：如果找不到文件，打印一下当前路径在哪里，方便纠错
-        print(f"Current Path: {os.getcwd()}")
+        # print("DEBUG: PDF 文件没找到,路径不对")
         return None
-
     try:
-        # 上传到 Google
         pdf_file = genai.upload_file(path=pdf_path, display_name="AASHTO Manual")
+        # print("DEBUG: 上传成功", pdf_file)
         return pdf_file
     except Exception as e:
-        # 这里的报错可以打印出来，看看是不是 API Key 的权限问题
+        # print("DEBUG: 上传失败 ->", repr(e))   # ← 把真实报错打出来
         return None
 
 
@@ -443,15 +442,22 @@ def generate_reasoning_response(query, stats, image, plan, pdf_file_handle):
     is_cs_intent = intent in ["corrosion_state", "corrosion_state_on_element"]
 
     if is_cs_intent:
-        # ── CS专用模式：强制带面积证据 ──
+        # ── CS专用模式:强制带面积证据 ──
         instruction = (
             "You are a Senior Bridge Inspector at Rutgers University. "
             "The AI vision system has detected corrosion condition states on the bridge. "
+            "\n\n[STRICT SOURCE RULE]"
+            "The ONLY reference document you may cite is the attached 'AASHTO Bridge Element "
+            "Guide Manual' (specifically the Corrosion defect criteria). "
+            "You are STRICTLY FORBIDDEN from citing any other standard, including "
+            "AASHTO LRFD, ASTM, ACI, section numbers, or any source not in the attached PDF. "
+            "If the attached manual is not available or does not cover this, say so and give "
+            "your assessment WITHOUT citing any specific standard or section number. "
+            "Never invent section numbers or specification codes. "
             "\n\n[TASK]"
-            "1. Report the detected area percentages for each condition state as Evidence. "
-            "   Format: 'CS2 (Fair): X.XX% | CS3 (Poor): X.XX% | CS4 (Severe): X.XX%' "
+            "1. Report the detected area percentages exactly as given in Vision Stats. "
             "2. Based on the dominant condition state, give an overall assessment. "
-            "3. If AASHTO manual is available, cross-reference and cite the criteria. "
+            "3. ONLY if the attached manual is provided, cite its criteria for Defect Corrosion. "
             "4. End with a maintenance recommendation. "
             "5. Keep response under 5 sentences, professional and evidence-based."
         )
@@ -462,7 +468,7 @@ def generate_reasoning_response(query, stats, image, plan, pdf_file_handle):
             "You are a Senior Bridge Inspector at Rutgers University. "
             "A user is asking for the Condition State (CS) of a bridge element. "
             "\n\n[TASK]"
-            "1. Reference the attached 'AASHTO Manual' specifically for 'Defect 1000: Corrosion'. "
+            "1. Reference the attached 'AASHTO Manual' specifically the Corrosion defect criteria. "
             "2. Analyze the 'Vision Stats' which provides the percentage of corrosion area. "
             "3. Cross-reference the percentage with the AASHTO criteria (CS1 to CS4). "
             "4. Provide a definitive Condition State (e.g., CS3 - Poor). "
@@ -513,6 +519,7 @@ def generate_reasoning_response(query, stats, image, plan, pdf_file_handle):
         model = genai.GenerativeModel('models/gemini-2.5-flash-lite')
         # 如果你已经有 gemini-2.0-flash 权限，也可以尝试替换
         # 修改后的代码：动态构建 Payload，防止 None 导致崩溃
+        # st.write("DEBUG pdf_file_handle:", pdf_file_handle)
         content_payload = []
         if pdf_file_handle is not None:
             content_payload.append(pdf_file_handle)
