@@ -52,7 +52,6 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-
 import streamlit as st
 
 # 从 Streamlit 的安全设置中读取
@@ -142,6 +141,7 @@ def load_model():
 
     return hrnet, cs_model, "CPU"
 
+
 # ==========================================
 # 3. 增强型规划者 (The Logical Planner)
 # 🎯 引入 Single, Union, Intersection 逻辑
@@ -167,9 +167,11 @@ def ask_gemini_planner(query):
 
     # Logic Rules:
     - "Corrosion" is "rust" (Defect ID 1).
-    - Use "intersection" ONLY for relationship patterns like "rust on pier" or "corrosion in girder".
+    - Use "intersection" ONLY for rust-coverage patterns like "how much rust on pier", NOT for condition/corrosion STATE questions.
     - Set "mode": "technical" ONLY if the user asks for areas, percentages, or explicit numbers.
     - For "What is this image?" or "Describe this bridge", use intent "single", target "deck" (as a pivot), mode "summary".
+    - If the query contains "condition state", "corrosion state", "CS", or "severity" AND names a specific element (girder/pier/deck/floor_beam/bracing/bearing), ALWAYS use intent "corrosion_state_on_element".
+    - If it asks about condition/corrosion state for the WHOLE image (no specific element), use intent "corrosion_state".
 
         # Examples
     User: "Hello, who are you?"
@@ -200,6 +202,12 @@ def ask_gemini_planner(query):
     {{"intent": "corrosion_state_on_element",
      "base": {{"type": "element", "name": "girder"}},
      "mode": "technical"}}
+
+    User: "Show me the condition state of the pier"
+    {{"intent": "corrosion_state_on_element", "base": {{"type": "element", "name": "pier"}}, "mode": "technical"}}
+
+    User: "How severe is the deck corrosion?"
+    {{"intent": "corrosion_state_on_element", "base": {{"type": "element", "name": "deck"}}, "mode": "technical"}}
 
     # Operation:
     Always respond in correct JSON without explanations or markdown formatting. 
@@ -261,19 +269,26 @@ def get_cs_mask(cs_model, image_pil):
 # ==========================================
 
 def process_logical_vision(hrnet, cs_model, image_pil, plan):
-    # 获取原始 CNN 输出
     mask_e_pil, mask_d_pil = hrnet.get_raw_masks(image_pil)
     raw_e, raw_d = np.array(mask_e_pil), np.array(mask_d_pil)
     h, w = raw_e.shape
 
-    # 准备画布
     final_mask = np.zeros((h, w), dtype=np.uint8)
     intent = plan.get("intent", "single")
     found_info = []
     legend = []
 
-    # 反向查找 ID
-    E_REV = {v: k for k, v in ELEMENT_MAP.items()}
+    # ── rust 现在统一来自 CS 模型，预先算好 ──
+    rust_mask_cs = None
+    if cs_model is not None:
+        raw_cs_full = get_cs_mask(cs_model, image_pil)
+        rust_mask_cs = np.isin(raw_cs_full, [1, 2, 3])  # CS2/3/4
+
+    def get_rust_mask():
+        # 优先用 CS 合并掩码；CS 模型不可用时退回旧的 raw_d
+        if rust_mask_cs is not None:
+            return rust_mask_cs
+        return (raw_d == 1)
 
     try:
         # --- 逻辑 1: Single ---
@@ -281,47 +296,46 @@ def process_logical_vision(hrnet, cs_model, image_pil, plan):
             target = plan['target']
             name = target['name'].lower()
             if "rust" in name or "corrosion" in name:
-                final_mask = (raw_d == 1).astype(np.uint8) * 101  # 101 为 Rust 特殊色
+                final_mask = get_rust_mask().astype(np.uint8) * 101
             else:
                 eid = next((k for k, v in ELEMENT_MAP.items() if v == name), 0)
                 final_mask = (raw_e == eid).astype(np.uint8) * eid
 
-        # --- 逻辑 2: Union (并集) ---
+        # --- 逻辑 2: Union ---
         elif intent == "union":
             for t in plan.get('targets', []):
                 name = t['name'].lower()
-                if "rust" in name:
-                    final_mask[raw_d == 1] = 101
+                if "rust" in name or "corrosion" in name:
+                    final_mask[get_rust_mask()] = 101
                 else:
                     eid = next((k for k, v in ELEMENT_MAP.items() if v == name), 0)
                     final_mask[raw_e == eid] = eid
 
-        # --- 逻辑 3: Intersection (交集/约束) ---
+        # --- 逻辑 3: Intersection ---
         elif intent == "intersection":
             base_name = plan['base']['name'].lower()
             filt_name = plan['filter']['name'].lower()
-
             eid = next((k for k, v in ELEMENT_MAP.items() if v == base_name), 0)
             base_mask = (raw_e == eid)
 
-            if "rust" in filt_name:
-                rust_mask = (raw_d == 1)
+            if "rust" in filt_name or "corrosion" in filt_name:
+                rust_mask = get_rust_mask()
                 overlap = np.logical_and(base_mask, rust_mask)
                 final_mask[overlap] = 101
-                # 计算在该构件上的病害占比
                 base_area = np.sum(base_mask)
                 if base_area > 0:
                     ratio = (np.sum(overlap) / base_area) * 100
                     found_info.append(f"Rust on {base_name}: {ratio:.2f}% of component area")
+
         # --- 逻辑 4: 全图 Corrosion State ---
         elif intent == "corrosion_state":
             if cs_model is None:
                 st.error("CS model not loaded.")
             else:
-                raw_cs = get_cs_mask(cs_model, image_pil)
+                raw_cs = raw_cs_full
                 total_px = raw_cs.size
                 for cs_id, cs_name in CS_MAP.items():
-                    if cs_id == 0:  # ← 跳过Good/背景
+                    if cs_id == 0:
                         continue
                     px = np.sum(raw_cs == cs_id)
                     if px > 0:
@@ -339,10 +353,12 @@ def process_logical_vision(hrnet, cs_model, image_pil, plan):
                 eid = next((k for k, v in ELEMENT_MAP.items() if v == base_name), 0)
                 element_mask = (raw_e == eid)
                 element_px = np.sum(element_mask)
-                raw_cs = get_cs_mask(cs_model, image_pil)
+                raw_cs = raw_cs_full
 
+                if element_px == 0:
+                    st.warning(f"Element '{base_name}' not detected in image.")
                 for cs_id, cs_name in CS_MAP.items():
-                    if cs_id == 0:  # ← 跳过Good/背景
+                    if cs_id == 0:
                         continue
                     cs_region = (raw_cs == cs_id) & element_mask
                     px = np.sum(cs_region)
@@ -355,12 +371,11 @@ def process_logical_vision(hrnet, cs_model, image_pil, plan):
     except Exception as e:
         st.error(f"Logic Processing Error: {e}")
 
-    # 计算统计信息（通用）
+    # 统计信息 + 渲染（保持你原来的逻辑不变）
     unique_ids = np.unique(final_mask)
     for uid in unique_ids:
         if uid == 0: continue
-        if uid >= 200:  # CS类别，跳过，legend已在分支里单独处理
-            continue
+        if uid >= 200: continue
         px = np.sum(final_mask == uid)
         name = "Rust" if uid == 101 else ELEMENT_MAP.get(uid, "Unknown")
         color = (128, 0, 0) if uid == 101 else hrnet.colors[uid]
@@ -369,7 +384,6 @@ def process_logical_vision(hrnet, cs_model, image_pil, plan):
             ratio = (px / (h * w)) * 100
             found_info.append(f"{name}: {ratio:.2f}% total area")
 
-    # 渲染可视化
     res_img = cv2.cvtColor(np.array(image_pil), cv2.COLOR_RGB2BGR)
     overlay = np.zeros_like(res_img)
     for name, clr in legend:
@@ -383,7 +397,6 @@ def process_logical_vision(hrnet, cs_model, image_pil, plan):
 
     if legend:
         res_img = cv2.addWeighted(res_img, 0.7, overlay, 0.3, 0)
-        # 画轮廓线
         mask_binary = (final_mask > 0).astype(np.uint8) * 255
         contours, _ = cv2.findContours(mask_binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         cv2.drawContours(res_img, contours, -1, (255, 255, 255), 2)
