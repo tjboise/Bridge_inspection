@@ -486,20 +486,25 @@ def generate_reasoning_response(query, stats, image, plan, pdf_file_handle):
         )
 
     # 构造最终 Prompt
+    # 只有 CS 分析才强制带百分比证据；其它意图不加
+    evidence_block = ""
+    if is_cs_intent:
+        evidence_block = (
+            "\n    [EVIDENCE FORMAT REQUIREMENT]\n"
+            "    Include ONLY the actual percentages provided in Vision Stats above. "
+            "    Do NOT invent or assume any numbers. If Vision Stats is empty, do not mention percentages.\n"
+        )
+
     prompt = f"""
     {instruction}
 
     [CONTEXT DATA]
     - User Query: {query}
     - Vision Stats (AI Detection): {stats}
-
-    [EVIDENCE FORMAT REQUIREMENT]
-    Always include the detected percentages from Vision Stats in your response.
-    Example format: "AI detection shows CS2 (Fair): 12.3%, CS3 (Poor): 8.5%, CS4 (Severe): 3.2% of girder area."
-
-
+    {evidence_block}
     [OUTPUT]
     Respond in a neutral, expert tone. No prefaces like 'Sure' or 'Based on'.
+    Only state numbers that explicitly appear in Vision Stats. Never fabricate percentages.
     """
 
     # 调用模型
