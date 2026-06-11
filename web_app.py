@@ -342,7 +342,7 @@ def process_logical_vision(hrnet, cs_model, image_pil, plan):
                         ratio = px / total_px * 100
                         final_mask[raw_cs == cs_id] = cs_id + 200
                         legend.append((cs_name, CS_COLORS[cs_id]))
-                        found_info.append(f"CS{cs_id} ({cs_name.split('_')[1]}): {ratio:.2f}% of total image area")
+                        found_info.append(f"{cs_name.split('_')[0]} ({cs_name.split('_')[1]}): {ratio:.2f}% of total image area")
 
         # --- 逻辑 5: 特定构件上的 Corrosion State ---
         elif intent == "corrosion_state_on_element":
@@ -366,7 +366,7 @@ def process_logical_vision(hrnet, cs_model, image_pil, plan):
                         ratio = px / element_px * 100
                         final_mask[cs_region] = cs_id + 200
                         legend.append((cs_name, CS_COLORS[cs_id]))
-                        found_info.append(f"CS{cs_id} ({cs_name.split('_')[1]}): {ratio:.2f}% of {base_name} area")
+                        found_info.append(f"{cs_name.split('_')[0]} ({cs_name.split('_')[1]}): {ratio:.2f}% of {base_name} area")
 
     except Exception as e:
         st.error(f"Logic Processing Error: {e}")
