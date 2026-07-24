@@ -86,19 +86,4 @@ Download model weights and place them in `model_data/`:
 
 Structural element and defect annotations are sourced from the open-source steel bridge dataset accompanying [AECIF-Net](https://github.com/itschenyu/AECIF-Net). Corrosion state annotations follow [Bianchi et al. (2022)](https://github.com/beric7/corrosion_cs_classification), labelled in accordance with the Bridge Inspector's Reference Manual (BIRM) and AASHTO guidelines.
 
-## Citation
 
-If you use this work, please cite:
-
-```
-Zhang, T., & Wang, H. BridgeGPT: A Multimodal VLM Framework-based Reasoning 
-Segmentation Model for Bridge Inspection. Center for Advanced Infrastructure 
-and Transportation, Rutgers University.
-```
-
-## Acknowledgements
-
-Developed at the **Center for Advanced Infrastructure and Transportation (CAIT), Rutgers University**.
-
-- AECIF-Net: Zhang et al. (2024), *Automation in Construction*
-- CS Model: Bianchi & Hebdon (2022), *Journal of Computing in Civil Engineering*
