@@ -1,6 +1,6 @@
 # BridgeGPT — A Hybrid System for Bridge Inspection
 
-<img width="600" alt="logo" src="https://github.com/user-attachments/assets/cc95e49a-de1d-48d4-9324-f31715fc4120" />
+<!-- <img width="600" alt="logo" src="https://github.com/user-attachments/assets/cc95e49a-de1d-48d4-9324-f31715fc4120" /> -->
 
 A multimodal framework that combines **Vision-Language Models (VLMs)** and **Convolutional Neural Networks (CNNs)** for automated reasoning-based bridge inspection.
 
