@@ -555,8 +555,9 @@ def generate_reasoning_response(query, stats, image, plan, pdf_file_handle):
 # ==========================================
 # 6. UI 前端
 # ==========================================
-# 既然图片自带文字，直接居中显示该图片即可
-st.image(BRIDGEGPT_LOGO, width=300)  # width 可以根据页面布局调整到你想要的大小
+st.markdown(
+    """<div style="display:flex;align-items:center;"><h1>A hybrid system for bridge inspection</h1></div>""",
+    unsafe_allow_html=True)
 
 # hrnet, _ = load_model()
 # 初始化模型和 PDF 知识库
